@@ -246,6 +246,10 @@ class OnPolicyRunner:
         print(log_string)
 
     def save(self, path, infos=None):
+        save_dir = os.path.dirname(path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+
         torch.save({
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
