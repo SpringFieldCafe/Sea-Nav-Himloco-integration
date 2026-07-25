@@ -45,8 +45,71 @@ import time
 import cv2
 from isaacgym import gymapi
 
+
+def _info_value_to_bool(value):
+    if value is None:
+        return False
+    if torch.is_tensor(value):
+        return bool(value.flatten()[0].item()) if value.numel() > 0 else False
+    if isinstance(value, np.ndarray):
+        return bool(value.flatten()[0]) if value.size > 0 else False
+    if isinstance(value, (list, tuple)):
+        return bool(value[0]) if len(value) > 0 else False
+    return bool(value)
+
+
+def _info_value_to_int(value, default=0):
+    if value is None:
+        return default
+    if torch.is_tensor(value):
+        return int(value.flatten()[0].item()) if value.numel() > 0 else default
+    if isinstance(value, np.ndarray):
+        return int(value.flatten()[0]) if value.size > 0 else default
+    if isinstance(value, (list, tuple)):
+        return int(value[0]) if len(value) > 0 else default
+    return int(value)
+
+
+def _get_episode_result(infos):
+    reason = infos.get("termination_reason", {})
+    if _info_value_to_bool(reason.get("goal_reached")):
+        return "success"
+    if _info_value_to_bool(reason.get("fall_down")):
+        return "fall_down"
+    if _info_value_to_bool(reason.get("stand_still")):
+        return "stand_still"
+    if (
+        _info_value_to_bool(reason.get("terminate_contact"))
+        or _info_value_to_bool(reason.get("replay_collision_reset"))
+        or _info_value_to_bool(reason.get("hard_force_reset"))
+    ):
+        return "collision"
+    if _info_value_to_bool(reason.get("timeout")):
+        return "timeout"
+    return "other"
+
+
+def _print_eval_summary(stats):
+    total = stats["total"]
+    success_rate = 100.0 * stats["success"] / total if total > 0 else 0.0
+    mean_length = float(np.mean(stats["episode_lengths"])) if stats["episode_lengths"] else 0.0
+
+    print("================ Evaluation Summary ================")
+    print(f"Total episodes: {total}")
+    print(f"Successes: {stats['success']}")
+    print(f"Success rate: {success_rate:.2f}%")
+    print(f"Collisions: {stats['collision']}")
+    print(f"Timeouts: {stats['timeout']}")
+    print(f"Stand still: {stats['stand_still']}")
+    print(f"Fall down: {stats['fall_down']}")
+    print(f"Other terminations: {stats['other']}")
+    print(f"Average episode length: {mean_length:.1f} steps")
+
     
 def play(args):
+    if args.num_episodes <= 0:
+        raise ValueError("--num_episodes must be greater than 0")
+
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # overwrite some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
@@ -84,8 +147,6 @@ def play(args):
 
     # load policy
     train_cfg.runner.resume = True
-    train_cfg.runner.load_run = -1
-    train_cfg.runner.checkpoint = -1
 
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
@@ -105,30 +166,44 @@ def play(args):
 
     RECORD_VIDEO = False
     SAVE_IMAGES = False
-    TOTAL_EPISODES = 10
+    total_episodes = args.num_episodes
     video = None
     current_frame = 0
     max_frames = 20000
 
-    env.reset()
     obs, _ = env.reset()
-    episode_count = 0
+    stats = {
+        "total": 0,
+        "success": 0,
+        "collision": 0,
+        "timeout": 0,
+        "stand_still": 0,
+        "fall_down": 0,
+        "other": 0,
+        "episode_lengths": [],
+    }
+    max_eval_steps = total_episodes * (int(env.max_episode_length) + 1)
 
     with torch.no_grad():
-        for i in range(100 * int(env.max_episode_length)):
+        for i in range(max_eval_steps):
             # Step the environment
             actions = policy(obs.detach())
             obs, _, rews, dones, infos = env.step(actions.detach())
             env.gym.set_camera_location(camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0), gymapi.Vec3(4.99, 5.0, 0.0))
 
             if dones.any():
-                episode_count += 1
-                print(f"============== Episode {episode_count} Finished ============== ")
+                result = _get_episode_result(infos)
+                episode_length = _info_value_to_int(infos.get("episode_lengths"), default=0)
+                stats["total"] += 1
+                stats[result] += 1
+                stats["episode_lengths"].append(episode_length)
+                print(f"============== Episode {stats['total']} Finished: {result}, length={episode_length} steps ============== ")
 
-            if episode_count == TOTAL_EPISODES:
-                print(f"Reached {TOTAL_EPISODES} episodes, stopping.")
+            if stats["total"] == total_episodes:
+                print(f"Reached {total_episodes} episodes, stopping.")
                 if video is not None:
                     video.release()  
+                _print_eval_summary(stats)
                 break           
 
             # Recording Logic
@@ -163,6 +238,12 @@ def play(args):
                     video = None
                 RECORD_VIDEO = False
                 SAVE_IMAGES = False
+
+    if stats["total"] < total_episodes:
+        print(f"Stopped after {stats['total']} episodes before reaching requested {total_episodes}.")
+        if video is not None:
+            video.release()
+        _print_eval_summary(stats)
 
 
 if __name__ == '__main__':

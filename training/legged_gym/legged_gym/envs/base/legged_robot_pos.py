@@ -124,6 +124,9 @@ class LeggedRobotPos(LeggedRobot):
         self.last_collision_active = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.is_replay = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.fall_down = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.terminate_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.hard_force_reset = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.replay_collision_reset = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         
         # --- Collision Visualization ---
         max_col_pts = getattr(self.cfg.replay, 'max_collision_points', 10)
@@ -354,6 +357,17 @@ class LeggedRobotPos(LeggedRobot):
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
             return
+        episode_lengths = self.episode_length_buf[env_ids].clone()
+        termination_reason = {
+            "goal_reached": self.goal_reached_flag[env_ids].clone(),
+            "collision": self.collision_occurred[env_ids].clone(),
+            "timeout": self.time_out_buf[env_ids].clone(),
+            "fall_down": self.fall_down[env_ids].clone(),
+            "stand_still": self.stand_still_flag[env_ids].clone(),
+            "terminate_contact": self.terminate_buf[env_ids].clone(),
+            "hard_force_reset": self.hard_force_reset[env_ids].clone(),
+            "replay_collision_reset": self.replay_collision_reset[env_ids].clone(),
+        }
             
         # Separate Normal vs Replay
         # Only replay if ENABLED in config and at least one collision occurred 
@@ -405,6 +419,7 @@ class LeggedRobotPos(LeggedRobot):
         self.last_contacts[env_ids] = False
         self.collision_occurred[env_ids] = False # Reset collision flag
         self.last_collision_active[env_ids] = False
+        self.replay_collision_reset[env_ids] = False
         self.num_collisions[env_ids] = 0 # Reset collision count for visualization
         self.collision_pos_hist[env_ids] = 0 # Clear history
         
@@ -419,6 +434,8 @@ class LeggedRobotPos(LeggedRobot):
             self.extras["episode"]["goal_level"] = torch.mean(self.goal_levels.float())
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
+        self.extras["termination_reason"] = termination_reason
+        self.extras["episode_lengths"] = episode_lengths
         
     def _update_terrain_curriculum(self, env_ids):
         if not self.init_done:
@@ -564,7 +581,8 @@ class LeggedRobotPos(LeggedRobot):
         
         self.reset_buf = self.terminate_buf.clone() # Death always causes reset
         # Hard Force Reset (e.g., getting squashed/glitched)
-        self.reset_buf |= torch.any(torch.norm(self.contact_forces[:, :, :2], dim=-1) > 50.0, dim=1)
+        self.hard_force_reset = torch.any(torch.norm(self.contact_forces[:, :, :2], dim=-1) > 50.0, dim=1)
+        self.reset_buf |= self.hard_force_reset
 
         # Spawn-in-obstacle detection
         if self.initial_.any():
@@ -589,6 +607,7 @@ class LeggedRobotPos(LeggedRobot):
         early_prob = early_prob_min + (early_prob_max - early_prob_min) * (self.goal_levels / 1.5).clip(max=1.0)
         
         trigger_replay_mask = is_new_collision & (torch.rand(self.num_envs, device=self.device) < early_prob)
+        self.replay_collision_reset = trigger_replay_mask.clone()
         
         # IMPORTANT: Updated to include termination penalty for early resets to discourage collision-seeking behavior.
         self.reset_buf |= trigger_replay_mask
