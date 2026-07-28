@@ -160,6 +160,9 @@ def get_args():
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
         {"name": "--num_episodes", "type": int, "default": 10, "help": "Number of episodes to run during policy evaluation."},
+        {"name": "--difficulty", "type": str, "default": "hard", "help": "Evaluation room difficulty: easy, medium, or hard."},
+        {"name": "--episode_length_s", "type": float, "default": 40.0, "help": "Maximum evaluation episode length in seconds."},
+        {"name": "--disable_stand_still", "action": "store_true", "default": False, "help": "Disable stand-still early termination during evaluation."},
         
         {"name": "--no_wandb", "action": "store_true", "default": True, "help": "Disable logging to Weights and Biases (wandb)"},
         {"name": "--test", "action": "store_true", "default": False, "help": "Run in test mode (overrides some parameters for testing)"},

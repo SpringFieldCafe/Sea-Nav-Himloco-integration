@@ -111,10 +111,38 @@ def play(args):
         raise ValueError("--num_episodes must be greater than 0")
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    difficulty_to_terrain = {
+        "easy": "easy_room",
+        "medium": "middle_room",
+        "hard": "hard_room",
+    }
+    if args.difficulty not in difficulty_to_terrain:
+        raise ValueError(
+            f"Unsupported difficulty: {args.difficulty}. "
+            "Choose from easy, medium, hard."
+        )
+    if args.episode_length_s <= 0:
+        raise ValueError("--episode_length_s must be greater than 0.")
+
+    terrain_type = difficulty_to_terrain[args.difficulty]
+    is_repository_default = (
+        args.difficulty == "hard"
+        and abs(args.episode_length_s - 40.0) < 1e-9
+        and not args.disable_stand_still
+    )
+    protocol_name = "repository-default" if is_repository_default else "custom"
+    print(f"Evaluation difficulty: {args.difficulty} (terrain_type={terrain_type})")
+    print(f"Episode limit: {args.episode_length_s:.1f} seconds")
+    print(
+        "Stand-still termination: "
+        f"{'disabled' if args.disable_stand_still else 'enabled'}"
+    )
+    print(f"Evaluation protocol: {protocol_name}")
+
     # overwrite some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     
-    env_cfg.terrain.terrain_types = ['hard_room']  
+    env_cfg.terrain.terrain_types = [terrain_type]
     env_cfg.terrain.terrain_proportions = [1.0]
     env_cfg.asset.file = '{LEGGED_GYM_ROOT_DIR}/resources/go2_description/urdf/go2_description.urdf'
     env_cfg.replay.enable_collision_replay = False
@@ -136,8 +164,8 @@ def play(args):
     env_cfg.domain_rand.max_push_vel_xy = 0.0
     env_cfg.domain_rand.randomize_base_mass = True
     env_cfg.domain_rand.added_mass_range = [0, 0]
-    env_cfg.env.episode_length_s = 40
-    env_cfg.env.stay_time = 500
+    env_cfg.env.episode_length_s = args.episode_length_s
+    env_cfg.env.stay_time = 10**9 if args.disable_stand_still else 500
     env_cfg.env.debug_viz = True
     env_cfg.asset.terminate_after_contacts_on = [] # no termination
 
