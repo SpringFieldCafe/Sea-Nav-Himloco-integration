@@ -58,17 +58,104 @@ def scale_robot_and_goal(robot_pos=None, goal_pos=None, scale_factor=5):
     final_robot_pos = [final_robot_pos_x, final_robot_pos_y]
     return final_robot_pos, final_goal_pos
             
-def place_robot_and_goal(room, min_distance=5, min_goal_distance=35):
-    """Place robot and goal positions, ensuring valid and obstacle-free locations."""
-    grid_size = room.shape[0]
-    while True:
-        robot_pos = [np.random.randint(1, grid_size - 1), np.random.randint(1, grid_size - 1)]
-        goal_pos = [np.random.randint(1, grid_size - 1), np.random.randint(1, grid_size - 1)]
-        if room[tuple(robot_pos)] == 0 and room[tuple(goal_pos)] == 0:
-            if is_far_from_obstacles(room, robot_pos, min_distance) and is_far_from_obstacles(room, goal_pos, min_distance):
-                if np.linalg.norm(np.array(robot_pos) - np.array(goal_pos)) > min_goal_distance:
-                    if is_path_with_obstacle(room, robot_pos, goal_pos):
-                        return robot_pos, goal_pos
+def place_robot_and_goal(
+    room,
+    min_distance=5,
+    min_goal_distance=35,
+    max_attempts=50_000,
+):
+    """Place valid robot and goal positions with bounded retries."""
+    rows, cols = room.shape
+
+    if rows < 3 or cols < 3:
+        raise ValueError(
+            f"Room is too small for placement: room_shape={room.shape}"
+        )
+
+    if max_attempts <= 0:
+        raise ValueError(
+            f"max_attempts must be greater than 0, got {max_attempts}"
+        )
+
+    # Only require the direct path to cross an obstacle when the room
+    # actually contains an interior obstacle.
+    interior_obstacle_cells = int(
+        np.count_nonzero(room[1:-1, 1:-1] > 0.1)
+    )
+    require_path_obstacle = interior_obstacle_cells > 0
+
+    rejected = {
+        "occupied": 0,
+        "near_obstacle": 0,
+        "goal_too_close": 0,
+        "path_without_obstacle": 0,
+    }
+
+    for attempt in range(1, max_attempts + 1):
+        robot_pos = [
+            np.random.randint(1, rows - 1),
+            np.random.randint(1, cols - 1),
+        ]
+        goal_pos = [
+            np.random.randint(1, rows - 1),
+            np.random.randint(1, cols - 1),
+        ]
+
+        if (
+            room[tuple(robot_pos)] != 0
+            or room[tuple(goal_pos)] != 0
+        ):
+            rejected["occupied"] += 1
+
+        elif (
+            not is_far_from_obstacles(
+                room, robot_pos, min_distance
+            )
+            or not is_far_from_obstacles(
+                room, goal_pos, min_distance
+            )
+        ):
+            rejected["near_obstacle"] += 1
+
+        elif (
+            np.linalg.norm(
+                np.asarray(robot_pos) - np.asarray(goal_pos)
+            )
+            <= min_goal_distance
+        ):
+            rejected["goal_too_close"] += 1
+
+        elif (
+            require_path_obstacle
+            and not is_path_with_obstacle(
+                room, robot_pos, goal_pos
+            )
+        ):
+            rejected["path_without_obstacle"] += 1
+
+        else:
+            return robot_pos, goal_pos
+
+        if attempt % 5_000 == 0:
+            print(
+                "[place_robot_and_goal] "
+                f"attempt={attempt}/{max_attempts}, "
+                f"interior_obstacle_cells={interior_obstacle_cells}, "
+                f"require_path_obstacle={require_path_obstacle}, "
+                f"rejected={rejected}",
+                flush=True,
+            )
+
+    raise RuntimeError(
+        "Unable to place robot and goal after "
+        f"{max_attempts} attempts; "
+        f"room_shape={room.shape}, "
+        f"min_distance={min_distance}, "
+        f"min_goal_distance={min_goal_distance}, "
+        f"interior_obstacle_cells={interior_obstacle_cells}, "
+        f"require_path_obstacle={require_path_obstacle}, "
+        f"rejected={rejected}"
+    )
 
 def create_room(grid_size=10):
     """Create a room with walls around the boundary."""
