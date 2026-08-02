@@ -30,6 +30,7 @@
 
 import os
 import copy
+import sys
 import torch
 import numpy as np
 import random
@@ -156,6 +157,16 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
     return env_cfg, cfg_train
 
 def get_args():
+    # Isaac Gym's argument helper accepts one value for custom parameters,
+    # so normalize the convenient three-token smoke-command spelling before
+    # handing argv to its parser.
+    if "--smoke_command" in sys.argv:
+        command_index = sys.argv.index("--smoke_command")
+        command_values = sys.argv[command_index + 1:command_index + 4]
+        if len(command_values) == 3 and all(not value.startswith("--") for value in command_values):
+            sys.argv[command_index + 1] = ",".join(command_values)
+            del sys.argv[command_index + 2:command_index + 4]
+
     custom_parameters = [
         {"name": "--task", "type": str, "default": "go2_pos_rough", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
@@ -176,7 +187,7 @@ def get_args():
         {"name": "--himloco_policy", "type": str, "default": None, "help": "Path to the HIMLoco TorchScript policy."},
         {"name": "--viewer", "action": "store_true", "default": False, "help": "Create an Isaac Gym viewer for smoke tests."},
         {"name": "--smoke_steps", "type": int, "default": None, "help": "Limit zero-command smoke-test steps."},
-        {"name": "--smoke_command", "type": float, "nargs": 3, "default": [0.0, 0.0, 0.0], "metavar": ("VX", "VY", "WZ"), "help": "Navigation command for smoke tests."},
+        {"name": "--smoke_command", "type": str, "default": "0,0,0", "help": "Navigation command VX,VY,WZ for smoke tests."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
@@ -198,6 +209,12 @@ def get_args():
         args.num_envs = 100
     if getattr(args, "viewer", False):
         args.headless = False
+    try:
+        args.smoke_command = [float(value) for value in args.smoke_command.split(",")]
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("--smoke_command must contain VX,VY,WZ numeric values") from exc
+    if len(args.smoke_command) != 3:
+        raise ValueError("--smoke_command must contain exactly three values: VX,VY,WZ")
 
     return args
 
