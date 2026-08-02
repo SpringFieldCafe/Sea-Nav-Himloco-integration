@@ -69,11 +69,15 @@ def _print_smoke_summary(env, args, total_steps):
 def test_env(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
-    env_cfg.env.num_envs =  min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = 1 if getattr(args, "viewer", False) else min(env_cfg.env.num_envs, 10)
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
-    total_steps = int(10 * env.max_episode_length)
+    default_steps = int(10 * env.max_episode_length)
+    requested_steps = getattr(args, "smoke_steps", None)
+    total_steps = requested_steps if requested_steps is not None else default_steps
+    if total_steps <= 0:
+        raise ValueError("--smoke_steps must be greater than zero")
     _print_smoke_summary(env, args, total_steps)
     completed_episodes = 0
     for i in range(total_steps):

@@ -174,6 +174,8 @@ def get_args():
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
         {"name": "--locomotion_backend", "type": str, "choices": ["slr", "himloco"], "default": None, "help": "Locomotion backend to use."},
         {"name": "--himloco_policy", "type": str, "default": None, "help": "Path to the HIMLoco TorchScript policy."},
+        {"name": "--viewer", "action": "store_true", "default": False, "help": "Create an Isaac Gym viewer for smoke tests."},
+        {"name": "--smoke_steps", "type": int, "default": None, "help": "Limit zero-command smoke-test steps."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
@@ -193,7 +195,9 @@ def get_args():
         args.headless = False
         args.wandb = False
         args.num_envs = 100
-        
+    if getattr(args, "viewer", False):
+        args.headless = False
+
     return args
 
 def export_policy_as_jit(actor_critic, path, exported_policy_name):
