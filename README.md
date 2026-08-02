@@ -53,6 +53,43 @@ To visualize and test a trained policy:
 python training/legged_gym/legged_gym/scripts/play.py
 ```
 
+### HIMLoco locomotion backend
+
+SEA-Nav keeps the original SLR backend as the default. HIMLoco can be selected
+at runtime without copying its repository or policy into SEA-Nav:
+
+```bash
+python training/legged_gym/legged_gym/tests/test_env.py \
+  --task go2_pos_rough \
+  --locomotion_backend himloco \
+  --himloco_policy /path/to/HIMLoco/legged_gym/logs/rough_go2/exported/policies/policy_1.pt \
+  --viewer \
+  --smoke_steps 2000 \
+  --smoke_command 0.2 0 0
+```
+
+The HIMLoco policy path is a command-line input and is intentionally not
+hard-coded. The current adapter expects the rough-go2 exported stacked actor:
+270 input dimensions (45 observations over 6 newest-to-oldest history frames)
+and 12 joint outputs. The policy uses its own action scale, default joint
+angles, PD gains, command bounds, and action clipping defined by the HIMLoco
+contract in the Go2 configuration.
+
+The `policy_1.pt` file is a locomotion policy, not the SEA-Nav navigation
+policy. The high-level navigation policy remains loaded separately by the
+normal evaluation workflow. `--smoke_command VX VY WZ` is only for direct
+locomotion smoke tests; the trained HIMLoco command ranges are `vx,vy ∈ [-1,1]`
+and `wz ∈ [-2,2]`.
+
+The SLR backend remains available with the default configuration:
+
+```bash
+python -m pytest -q \
+  training/legged_gym/legged_gym/tests/test_himloco_policy.py \
+  training/legged_gym/legged_gym/tests/test_himloco_contract.py \
+  training/legged_gym/legged_gym/tests/test_slr_backend_regression.py
+```
+
 ---
 
 ## Deployment (Coming soon)

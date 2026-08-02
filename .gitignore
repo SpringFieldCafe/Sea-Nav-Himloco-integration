@@ -152,3 +152,21 @@ cython_debug/
 # Project specific
 logs/
 wandb/
+
+# Policies, checkpoints, and experiment artifacts
+*.jit
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.bin
+checkpoints/
+outputs/
+artifacts/
+tensorboard/
+events.out.tfevents.*
+
+# Serialized arrays and local datasets
+*.npy
+*.npz
+*.pkl
