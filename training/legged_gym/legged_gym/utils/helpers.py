@@ -132,6 +132,10 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             env_cfg.env.num_envs = args.num_envs
         if args.seed is not None:
             env_cfg.seed = args.seed
+        if args.locomotion_backend is not None:
+            env_cfg.locomotion.backend = args.locomotion_backend
+        if args.himloco_policy is not None:
+            env_cfg.locomotion.himloco_policy = args.himloco_policy
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -168,6 +172,8 @@ def get_args():
         {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
+        {"name": "--locomotion_backend", "type": str, "choices": ["slr", "himloco"], "default": None, "help": "Locomotion backend to use."},
+        {"name": "--himloco_policy", "type": str, "default": None, "help": "Path to the HIMLoco TorchScript policy."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(

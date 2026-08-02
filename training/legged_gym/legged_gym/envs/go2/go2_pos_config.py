@@ -34,6 +34,10 @@ import numpy as np
 
 
 class Go2PosRoughCfg( LeggedRobotPosCfg ):
+    class locomotion:
+        backend = 'slr'
+        himloco_policy = None
+
     class loco:
         num_obs_buf = 45
         his_len = 10

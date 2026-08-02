@@ -45,6 +45,7 @@ from legged_gym.utils.grid2ray import *
 from .legged_robot_pos_config import LeggedRobotPosCfg
 from legged_gym.envs.go2.go2_pos_config import Go2PosRoughCfg
 from legged_gym.utils.custom_terrain import *
+from .locomotion_backend import make_locomotion_backend
 import torch.nn.functional as F
 
 SAVE_IMG = False
@@ -67,6 +68,9 @@ class LeggedRobotPos(LeggedRobot):
         self.base_lin_vel_pred = torch.zeros(
             self.num_envs, 3, device=self.device, dtype=torch.float)  
         self.actions_orig = self.actions.clone()
+        self.locomotion_backend = make_locomotion_backend(
+            self, getattr(self.cfg.locomotion, "backend", "slr")
+        )
 
         # Replay and Collision History Init
         self._init_replay_buffers()
@@ -130,9 +134,6 @@ class LeggedRobotPos(LeggedRobot):
         self.collision_pos_hist = torch.zeros(self.num_envs, max_col_pts, 3, device=self.device, dtype=torch.float)
         self.num_collisions = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         
-        self.slr_body = torch.jit.load(f"{LEGGED_GYM_ROOT_DIR}/legged_gym/ctrl_model/body_latest.jit")
-        self.slr_encoder_vel = torch.jit.load(f"{LEGGED_GYM_ROOT_DIR}/legged_gym/ctrl_model/encoder_vel.jit")
-        self.slr_encoder_latent = torch.jit.load(f"{LEGGED_GYM_ROOT_DIR}/legged_gym/ctrl_model/encoder_latent.jit")
 
     def _update_replay_buffer(self):
         # Update replay buffer
@@ -172,61 +173,14 @@ class LeggedRobotPos(LeggedRobot):
         Returns:
             [torch.Tensor]: Torques sent to the simulation
         """
-        actions_scaled = actions[:, :12] * 0.25
-        joint_pos_target = actions_scaled + self.default_dof_pos
-        torques = self.p_gains * (joint_pos_target- self.dof_pos) - self.d_gains * self.dof_vel
-        torques = torques 
+        control = self.locomotion_backend.control_params()
+        actions_scaled = actions[:, :12] * control["action_scale"]
+        joint_pos_target = actions_scaled + control["default_dof_pos"]
+        torques = control["p_gains"] * (joint_pos_target - self.dof_pos) - control["d_gains"] * self.dof_vel
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _compute_actions(self, nav_actions=None):
-        self.slr_commands = nav_actions
-        
-        scale_lin_vel = self.cfg.loco.normalization.obs_scales.lin_vel
-        scale_ang_vel = self.cfg.loco.normalization.obs_scales.ang_vel
-        scale_dof_pos = self.cfg.loco.normalization.obs_scales.dof_pos
-        scale_dof_vel = self.cfg.loco.normalization.obs_scales.dof_vel
-        
-        self.slr_commands_scale = torch.tensor([scale_lin_vel, scale_lin_vel, scale_ang_vel], device=self.device, requires_grad=False,)
-        self.slr_obs_buf =torch.cat((
-                self.base_ang_vel * scale_ang_vel, # 3
-                self.projected_gravity, # 3
-                self.slr_commands[:, :3] * self.slr_commands_scale,
-                self.reindex((self.dof_pos - self.default_dof_pos) * scale_dof_pos),
-                self.reindex(self.dof_vel * scale_dof_vel),
-                self.actions_orig),dim=-1)
-        
-        noise_scales = self.cfg.noise.noise_scales
-        noise_vec = torch.cat((torch.ones(3) * noise_scales.ang_vel,
-                                torch.ones(3) * noise_scales.gravity,
-                                torch.zeros(3),
-                                torch.ones(
-                                12) * noise_scales.dof_pos * self.obs_scales.dof_pos,
-                                torch.ones(
-                                12) * noise_scales.dof_vel * self.obs_scales.dof_vel,
-                                torch.zeros(self.num_actions),
-                    ), dim=0)
-        
-        if self.cfg.noise.add_noise:
-            self.slr_obs_buf += (2 * torch.rand_like(self.slr_obs_buf) - 1) * 0.5 * \
-                noise_vec.to(self.device)
-        
-        self.slr_obs_hist = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.slr_obs_buf] * self.cfg.env.his_len, dim=1),
-            torch.cat([
-                self.slr_obs_hist[:, 1:],
-                self.slr_obs_buf.unsqueeze(1)
-            ], dim=1)
-        )  
-        prop = self.slr_obs_buf
-        ang_vel = self.base_ang_vel[:, 2:] * scale_ang_vel
-        self.base_lin_vel_pred = self.slr_encoder_vel(self.slr_obs_hist.view(self.num_envs, -1))
-        latent = self.slr_encoder_latent(self.slr_obs_hist.view(self.num_envs, -1))
-        actor_obs = torch.cat(
-            (self.base_lin_vel_pred, prop, ang_vel, latent), dim=-1)
-        actions = self.slr_body(actor_obs)
-        
-        return actions
+        return self.locomotion_backend.compute_actions(nav_actions)
 
     def post_process_actions(self):
         """ Filter and clip navigation actions to prevent sim instability. """
@@ -389,6 +343,7 @@ class LeggedRobotPos(LeggedRobot):
         self.episode_length_buf[env_ids] = 0
         self.obs_history_buf[env_ids, :, :] = 0.
         self.slr_obs_hist[env_ids, :, :] = 0.
+        self.locomotion_backend.reset(env_ids)
         self.rays_hist[env_ids, :, :] = 5.
         self.pos_hist[env_ids, :, :] = 0.
         self.goal_hist[env_ids, :, :] = 0.
