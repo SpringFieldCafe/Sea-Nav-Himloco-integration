@@ -148,6 +148,7 @@ def test_slr_backend_matches_pre_refactor_reference():
 
 
 def test_slr_action_reindex_clip_and_torque_contract():
+    from legged_gym.envs.base.legged_robot import LeggedRobot
     from legged_gym.envs.base.legged_robot_pos import LeggedRobotPos
     from legged_gym.envs.base.locomotion_backend import SLRBackend
 
@@ -165,7 +166,10 @@ def test_slr_action_reindex_clip_and_torque_contract():
     raw = torch.tensor([[150.0, -150.0] + [0.0] * 10, [1.0] * 12])
     clipped = backend.clip_actions(raw)
     torch.testing.assert_close(clipped, torch.clip(raw, -100.0, 100.0))
-    reindexed = LeggedRobotPos._reindex_actions_for_sim(env, raw)
+    # Call the original base implementation directly.  LeggedRobotPos uses
+    # super(), which requires an actual LeggedRobotPos instance and is not
+    # meaningful for this lightweight regression stub.
+    reindexed = LeggedRobot._reindex_actions_for_sim(env, raw)
     torch.testing.assert_close(reindexed, raw[:, REINDEX])
 
     expected = torch.clip(
