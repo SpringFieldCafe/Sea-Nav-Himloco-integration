@@ -176,6 +176,7 @@ def get_args():
         {"name": "--himloco_policy", "type": str, "default": None, "help": "Path to the HIMLoco TorchScript policy."},
         {"name": "--viewer", "action": "store_true", "default": False, "help": "Create an Isaac Gym viewer for smoke tests."},
         {"name": "--smoke_steps", "type": int, "default": None, "help": "Limit zero-command smoke-test steps."},
+        {"name": "--smoke_command", "type": float, "nargs": 3, "default": [0.0, 0.0, 0.0], "metavar": ("VX", "VY", "WZ"), "help": "Navigation command for smoke tests."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(

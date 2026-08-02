@@ -48,11 +48,12 @@ def _stats(value):
 
 def _print_smoke_summary(env, args, total_steps):
     backend = getattr(env, "locomotion_backend", None)
-    print("================ HIMLoco zero-command smoke test ================")
+    print("================ HIMLoco locomotion smoke test ================")
     print(f"task={args.task}")
     print(f"locomotion_backend={getattr(backend, 'name', 'unknown')}")
     print(f"policy={getattr(backend, 'policy_path', 'n/a')}")
     print(f"device={env.device}, num_envs={env.num_envs}, headless={env.headless}")
+    print(f"smoke_command={list(args.smoke_command)}")
     print(f"simulation_dt={env.dt:.6f}s, control_frequency={1.0 / env.dt:.2f}Hz")
     print(f"num_actions={env.num_actions}, navigation_command_dim=3")
     print(f"max_episode_length={env.max_episode_length}, total_steps={total_steps}")
@@ -69,7 +70,14 @@ def _print_smoke_summary(env, args, total_steps):
 def test_env(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
-    env_cfg.env.num_envs = 1 if getattr(args, "viewer", False) else min(env_cfg.env.num_envs, 10)
+    viewer = getattr(args, "viewer", False)
+    env_cfg.env.num_envs = 1 if viewer else min(env_cfg.env.num_envs, 10)
+    if viewer:
+        # Keep the visual smoke test focused on one room instead of the full
+        # 10x10 curriculum terrain used by navigation training.
+        env_cfg.terrain.num_rows = 1
+        env_cfg.terrain.num_cols = 1
+        env_cfg.terrain.max_init_terrain_level = 0
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -84,7 +92,7 @@ def test_env(args):
         # LeggedRobotPos.step() consumes high-level navigation commands
         # [vx, vy, wz].  The 12-DOF locomotion action is produced internally
         # by the selected backend.
-        actions = 0. * torch.ones(env.num_envs, 3, device=env.device)
+        actions = torch.tensor(args.smoke_command, device=env.device).repeat(env.num_envs, 1)
         obs, _, rew, done, info = env.step(actions)
         if not torch.isfinite(obs).all() or not torch.isfinite(env.torques).all():
             raise FloatingPointError(
