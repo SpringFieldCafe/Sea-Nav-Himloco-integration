@@ -132,9 +132,9 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             env_cfg.env.num_envs = args.num_envs
         if args.seed is not None:
             env_cfg.seed = args.seed
-        if args.locomotion_backend is not None:
+        if getattr(args, "locomotion_backend", None) is not None:
             env_cfg.locomotion.backend = args.locomotion_backend
-        if args.himloco_policy is not None:
+        if getattr(args, "himloco_policy", None) is not None:
             env_cfg.locomotion.himloco_policy = args.himloco_policy
     if cfg_train is not None:
         if args.seed is not None:

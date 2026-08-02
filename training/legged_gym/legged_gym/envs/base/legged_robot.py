@@ -93,7 +93,7 @@ class LeggedRobot(BaseTask):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
-        actions_reindexed = self.reindex(actions)
+        actions_reindexed = self._reindex_actions_for_sim(actions)
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions_reindexed, -clip_actions, clip_actions).to(self.device)
         
@@ -113,6 +113,9 @@ class LeggedRobot(BaseTask):
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
+
+    def _reindex_actions_for_sim(self, actions):
+        return self.reindex(actions)
 
     def post_physics_step(self):
         """ check terminations, compute observations and rewards

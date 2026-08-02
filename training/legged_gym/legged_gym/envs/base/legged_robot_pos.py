@@ -179,6 +179,11 @@ class LeggedRobotPos(LeggedRobot):
         torques = control["p_gains"] * (joint_pos_target - self.dof_pos) - control["d_gains"] * self.dof_vel
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
+    def _reindex_actions_for_sim(self, actions):
+        if self.locomotion_backend.uses_identity_action_order():
+            return actions
+        return super()._reindex_actions_for_sim(actions)
+
     def _compute_actions(self, nav_actions=None):
         return self.locomotion_backend.compute_actions(nav_actions)
 
