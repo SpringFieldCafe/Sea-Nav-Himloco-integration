@@ -47,7 +47,10 @@ def test_env(args):
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     for i in range(int(10*env.max_episode_length)):
-        actions = 0.*torch.ones(env.num_envs, env.num_actions, device=env.device)
+        # LeggedRobotPos.step() consumes high-level navigation commands
+        # [vx, vy, wz].  The 12-DOF locomotion action is produced internally
+        # by the selected backend.
+        actions = 0. * torch.ones(env.num_envs, 3, device=env.device)
         obs, _, rew, done, info = env.step(actions)
     print("Done")
 
