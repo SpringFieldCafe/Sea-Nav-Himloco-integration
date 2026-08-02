@@ -133,6 +133,13 @@ class HIMLocoBackend(LocomotionBackend):
     HISTORY_LENGTH = 6
     INPUT_DIM = NUM_ONE_STEP_OBS * HISTORY_LENGTH
     ACTION_DIM = 12
+    ACTION_SCALE = 0.25
+    COMMAND_SCALE = (2.0, 2.0, 0.25)
+    ANGULAR_VELOCITY_SCALE = 0.25
+    DOF_POSITION_SCALE = 1.0
+    DOF_VELOCITY_SCALE = 0.05
+    P_GAIN = 20.0
+    D_GAIN = 0.5
 
     def __init__(self, env):
         super().__init__(env)
@@ -158,15 +165,16 @@ class HIMLocoBackend(LocomotionBackend):
         self.previous_action = torch.zeros(
             env.num_envs, self.ACTION_DIM, device=env.device, dtype=torch.float32
         )
+        self._reported_anomaly = False
 
         self.policy_to_sim = self._build_joint_mapping(env.dof_names)
         self.policy_to_sim_device = self.policy_to_sim.to(env.device)
         self.default_dof_pos = self._build_default_positions(env)
         self.p_gains = torch.full(
-            (self.ACTION_DIM,), 20.0, device=env.device, dtype=torch.float32
+            (self.ACTION_DIM,), self.P_GAIN, device=env.device, dtype=torch.float32
         )
         self.d_gains = torch.full(
-            (self.ACTION_DIM,), 0.5, device=env.device, dtype=torch.float32
+            (self.ACTION_DIM,), self.D_GAIN, device=env.device, dtype=torch.float32
         )
 
         with torch.inference_mode():
@@ -200,10 +208,11 @@ class HIMLocoBackend(LocomotionBackend):
         print("[HIMLoco] policy path:", self.policy_path)
         print("[HIMLoco] input dimension: 270, history length: 6, output dimension: 12")
         print("[HIMLoco] joint order:", ", ".join(self.POLICY_JOINT_NAMES))
-        print("[HIMLoco] action scale: 0.25, Kp: 20.0, Kd: 0.5")
+        print(f"[HIMLoco] action scale: {self.ACTION_SCALE}, Kp: {self.P_GAIN}, Kd: {self.D_GAIN}")
         print("[HIMLoco] policy control frequency: 50.0 Hz")
         print(f"[HIMLoco] simulation control frequency: {sim_frequency:.3f} Hz")
-        print("[HIMLoco] command scales: [2.0, 2.0, 0.25]")
+        print("[HIMLoco] command scales:", list(self.COMMAND_SCALE))
+        print("[HIMLoco] policy action clip: none; simulation action clip: 100.0")
         print(
             "[HIMLoco] command ranges:",
             env.cfg.commands.ranges.limit_vx,
@@ -217,30 +226,49 @@ class HIMLocoBackend(LocomotionBackend):
                 f"HIMLoco policy output must be ({batch_size}, 12), got {tuple(output.shape)}"
             )
         if not torch.isfinite(output).all():
+            self._report_anomaly("action", output)
             raise FloatingPointError("HIMLoco policy output contains NaN or Inf")
+
+    def _report_anomaly(self, name, value):
+        if self._reported_anomaly:
+            return
+        self._reported_anomaly = True
+        finite = torch.isfinite(value)
+        print(
+            f"[HIMLoco] invalid {name}: shape={tuple(value.shape)}, "
+            f"finite={bool(finite.all())}, min={value.nan_to_num().min().item()}, "
+            f"max={value.nan_to_num().max().item()}"
+        )
 
     def compute_actions(self, nav_actions):
         env = self.env
+        env.slr_commands = nav_actions
         command = nav_actions[:, :3]
         joint_pos = env.dof_pos[:, self.policy_to_sim_device] - self.default_dof_pos[:, self.policy_to_sim_device]
         joint_vel = env.dof_vel[:, self.policy_to_sim_device]
         one_step = torch.cat(
             (
-                command * torch.tensor([2.0, 2.0, 0.25], device=env.device),
-                env.base_ang_vel[:, :3] * 0.25,
+                command * torch.tensor(self.COMMAND_SCALE, device=env.device),
+                env.base_ang_vel[:, :3] * self.ANGULAR_VELOCITY_SCALE,
                 env.projected_gravity,
-                joint_pos,
-                joint_vel * 0.05,
+                joint_pos * self.DOF_POSITION_SCALE,
+                joint_vel * self.DOF_VELOCITY_SCALE,
                 self.previous_action,
             ),
             dim=-1,
         )
         if one_step.shape[-1] != self.NUM_ONE_STEP_OBS:
             raise RuntimeError(f"HIMLoco observation must be 45D, got {one_step.shape[-1]}")
+        if not torch.isfinite(one_step).all():
+            self._report_anomaly("observation", one_step)
+            raise FloatingPointError("HIMLoco observation contains NaN or Inf")
         self.history = torch.cat((one_step.unsqueeze(1), self.history[:, :-1]), dim=1)
         policy_input = self.history.reshape(env.num_envs, self.INPUT_DIM)
         if policy_input.shape[-1] != self.INPUT_DIM:
             raise RuntimeError(f"HIMLoco input must be 270D, got {policy_input.shape[-1]}")
+        if not torch.isfinite(policy_input).all():
+            self._report_anomaly("input", policy_input)
+            raise FloatingPointError("HIMLoco input contains NaN or Inf")
 
         with torch.inference_mode():
             policy_action = self.policy(policy_input)
@@ -257,7 +285,7 @@ class HIMLocoBackend(LocomotionBackend):
 
     def control_params(self):
         return {
-            "action_scale": 0.25,
+            "action_scale": self.ACTION_SCALE,
             "default_dof_pos": self.default_dof_pos,
             "p_gains": self.p_gains,
             "d_gains": self.d_gains,
