@@ -38,6 +38,38 @@ class Go2PosRoughCfg( LeggedRobotPosCfg ):
         backend = 'slr'
         himloco_policy = None
 
+        class himloco:
+            # Contract copied from HIMLoco rough_go2 training configuration.
+            num_one_step_obs = 45
+            history_length = 6
+            action_scale = 0.25
+            action_clip = 100.0
+            command_scale = [2.0, 2.0, 0.25]
+            command_ranges = {
+                'vx': [-1.0, 1.0],
+                'vy': [-1.0, 1.0],
+                'wz': [-2.0, 2.0],
+            }
+            angular_velocity_scale = 0.25
+            dof_position_scale = 1.0
+            dof_velocity_scale = 0.05
+            p_gain = 20.0
+            d_gain = 0.5
+            default_joint_angles = {
+                'FL_hip_joint': 0.1,
+                'FL_thigh_joint': 0.8,
+                'FL_calf_joint': -1.5,
+                'FR_hip_joint': -0.1,
+                'FR_thigh_joint': 0.8,
+                'FR_calf_joint': -1.5,
+                'RL_hip_joint': 0.1,
+                'RL_thigh_joint': 1.0,
+                'RL_calf_joint': -1.5,
+                'RR_hip_joint': -0.1,
+                'RR_thigh_joint': 1.0,
+                'RR_calf_joint': -1.5,
+            }
+
     class loco:
         num_obs_buf = 45
         his_len = 10

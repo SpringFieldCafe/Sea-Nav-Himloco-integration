@@ -191,14 +191,22 @@ class LeggedRobotPos(LeggedRobot):
         """ Filter and clip navigation actions to prevent sim instability. """
         alpha = self.cfg.commands.alpha
         self.nav_actions_filtered = alpha * self.nav_actions_orig + (1 - alpha) * self.nav_actions_filtered
-        self.nav_actions_after_clip = torch.clip(self.nav_actions_filtered, min=self.nav_clip_min, max=self.nav_clip_max)
+        backend_bounds = self.locomotion_backend.command_bounds()
+        if backend_bounds is None:
+            clip_min, clip_max = self.nav_clip_min, self.nav_clip_max
+        else:
+            clip_min, clip_max = backend_bounds
+        self.nav_actions_after_clip = torch.clip(self.nav_actions_filtered, min=clip_min, max=clip_max)
+        self.locomotion_backend.record_commands(
+            self.nav_actions_filtered, self.nav_actions_after_clip
+        )
 
     def step(self, nav_actions):
-        clip_actions = self.cfg.normalization.clip_actions
         self.nav_actions_orig = torch.clip(nav_actions, -3.0, 3.0).to(self.device)
         self.post_process_actions()
         loco_actions = self._compute_actions(nav_actions=self.nav_actions_after_clip)
-        self.actions_orig = torch.clip(loco_actions, -clip_actions, clip_actions).to(self.device)
+        self.actions_orig = self.locomotion_backend.clip_actions(loco_actions).to(self.device)
+        self.locomotion_backend.record_action(self.actions_orig)
         return super().step(actions=self.actions_orig)
     
     def _get_env_origins(self):
