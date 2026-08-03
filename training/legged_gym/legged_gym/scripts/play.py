@@ -91,6 +91,18 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     print('Loaded policy from: ', task_registry.loaded_policy_path)
 
+    def navigation_policy(observations):
+        with torch.inference_mode():
+            actions = policy(observations)
+        if actions.ndim != 2 or actions.shape[1] != env.num_nav_actions:
+            raise RuntimeError(
+                f"SEA-Nav navigation policy must return [N,{env.num_nav_actions}], "
+                f"got {tuple(actions.shape)}"
+            )
+        if not torch.isfinite(actions).all():
+            raise FloatingPointError("SEA-Nav navigation policy returned NaN or Inf")
+        return actions
+
     # ---------------------------
     # Camera Setup for Recording
     # ---------------------------
@@ -114,11 +126,11 @@ def play(args):
     obs, _ = env.reset()
     episode_count = 0
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for i in range(100 * int(env.max_episode_length)):
             # Step the environment
-            actions = policy(obs.detach())
-            obs, _, rews, dones, infos = env.step(actions.detach())
+            actions = navigation_policy(obs.detach())
+            obs, _, rews, dones, infos = env.step(actions)
             env.gym.set_camera_location(camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0), gymapi.Vec3(4.99, 5.0, 0.0))
 
             if dones.any():

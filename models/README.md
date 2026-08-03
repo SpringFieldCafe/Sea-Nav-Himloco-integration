@@ -42,9 +42,20 @@ The navigation policy must produce the SEA-Nav navigation action
 `[vx, vy, wz]`. Its exact loader arguments depend on the training run and
 checkpoint format, so the file is not treated as a HIMLoco actor.
 
+For a complete PPO checkpoint such as `model_2000.pt`, evaluate it with:
+
+```bash
+python training/legged_gym/legged_gym/scripts/play.py \
+  --task go2_pos_rough \
+  --navigation_checkpoint models/navigation/model_2000.pt \
+  --locomotion_backend himloco \
+  --himloco_policy models/locomotion/himloco/policy_1.pt
+```
+
 The two model files are intentionally independent. The navigation policy
 selects commands, while the HIMLoco policy turns those commands into 12 joint
 actions. No HIMLoco source repository is copied into this project.
 
-The peer navigation model has not been added yet because its source path and
-export format have not been provided.
+Navigation model files are ignored by Git. Keep the local checkpoint at the
+documented path or pass another path explicitly; do not commit checkpoint
+contents or the extracted serialization directory.

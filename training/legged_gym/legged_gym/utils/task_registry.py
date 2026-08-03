@@ -154,8 +154,18 @@ class TaskRegistry():
         runner_class = eval(train_cfg.runner_class_name)
 
         runner = runner_class(env, train_cfg_dict, log_dir, args=args, device=args.rl_device)
+        navigation_checkpoint = getattr(args, "navigation_checkpoint", None)
         resume = train_cfg.runner.resume
-        if resume:
+        if navigation_checkpoint is not None:
+            if not os.path.isfile(navigation_checkpoint):
+                raise FileNotFoundError(
+                    f"Navigation checkpoint does not exist: {navigation_checkpoint}"
+                )
+            self.loaded_policy_path = os.path.abspath(navigation_checkpoint)
+            print(f"Loading navigation checkpoint from: {self.loaded_policy_path}")
+            # Inference only: optimizer state is not needed for evaluation.
+            runner.load(self.loaded_policy_path, load_optimizer=False)
+        elif resume:
             # load previously trained model
             resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
             self.loaded_policy_path = resume_path

@@ -95,6 +95,19 @@ The bundled HIMLoco policy is the low-level locomotion actor; the peer-trained
 navigation policy belongs in `models/navigation/peer_policy.pt` and must still
 be supplied separately until its exported file is available.
 
+To evaluate a local SEA-Nav PPO checkpoint directly with HIMLoco:
+
+```bash
+python training/legged_gym/legged_gym/scripts/play.py \
+  --task go2_pos_rough \
+  --navigation_checkpoint models/navigation/model_2000.pt \
+  --locomotion_backend himloco \
+  --himloco_policy models/locomotion/himloco/policy_1.pt
+```
+
+`--navigation_checkpoint` takes the complete PPO checkpoint and loads only
+its model state for inference; the optimizer state is not used.
+
 ---
 
 ## Deployment (Coming soon)
