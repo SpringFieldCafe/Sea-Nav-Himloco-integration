@@ -90,6 +90,11 @@ python -m pytest -q \
   training/legged_gym/legged_gym/tests/test_slr_backend_regression.py
 ```
 
+For a shareable two-policy layout, see [`models/README.md`](models/README.md).
+The bundled HIMLoco policy is the low-level locomotion actor; the peer-trained
+navigation policy belongs in `models/navigation/peer_policy.pt` and must still
+be supplied separately until its exported file is available.
+
 ---
 
 ## Deployment (Coming soon)
