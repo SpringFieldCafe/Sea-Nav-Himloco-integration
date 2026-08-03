@@ -49,8 +49,13 @@ python training/legged_gym/legged_gym/scripts/play.py \
   --task go2_pos_rough \
   --navigation_checkpoint models/navigation/model_2000.pt \
   --locomotion_backend himloco \
-  --himloco_policy models/locomotion/himloco/policy_1.pt
+  --himloco_policy models/locomotion/himloco/policy_1.pt \
+  --navigation_speed_scale 1.2
 ```
+
+Use `--navigation_speed_scale 1.0` for the original navigation policy output;
+values such as `1.2` or `1.5` increase only the forward `vx` command for visual
+experiments. This is an execution-time override, not a retrained policy.
 
 The two model files are intentionally independent. The navigation policy
 selects commands, while the HIMLoco policy turns those commands into 12 joint

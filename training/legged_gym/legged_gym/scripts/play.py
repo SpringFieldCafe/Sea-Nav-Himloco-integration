@@ -47,6 +47,9 @@ from isaacgym import gymapi
 
     
 def play(args):
+    if args.navigation_speed_scale <= 0.0:
+        raise ValueError("--navigation_speed_scale must be greater than zero")
+
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # overwrite some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
@@ -90,6 +93,7 @@ def play(args):
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
     print('Loaded policy from: ', task_registry.loaded_policy_path)
+    print(f"Navigation forward speed scale: {args.navigation_speed_scale:.3f}")
 
     def navigation_policy(observations):
         with torch.inference_mode():
@@ -130,6 +134,7 @@ def play(args):
         for i in range(100 * int(env.max_episode_length)):
             # Step the environment
             actions = navigation_policy(obs.detach())
+            actions[:, 0] *= args.navigation_speed_scale
             obs, _, rews, dones, infos = env.step(actions)
             env.gym.set_camera_location(camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0), gymapi.Vec3(4.99, 5.0, 0.0))
 

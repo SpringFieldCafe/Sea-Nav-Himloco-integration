@@ -102,11 +102,14 @@ python training/legged_gym/legged_gym/scripts/play.py \
   --task go2_pos_rough \
   --navigation_checkpoint models/navigation/model_2000.pt \
   --locomotion_backend himloco \
-  --himloco_policy models/locomotion/himloco/policy_1.pt
+  --himloco_policy models/locomotion/himloco/policy_1.pt \
+  --navigation_speed_scale 1.2
 ```
 
 `--navigation_checkpoint` takes the complete PPO checkpoint and loads only
-its model state for inference; the optimizer state is not used.
+its model state for inference; the optimizer state is not used. The optional
+`--navigation_speed_scale` multiplies the policy's forward `vx` command during
+visual play; `1.0` preserves the original policy output.
 
 ---
 

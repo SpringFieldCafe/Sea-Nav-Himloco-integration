@@ -175,6 +175,7 @@ def get_args():
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
         {"name": "--navigation_checkpoint", "type": str, "default": None, "help": "Direct path to a SEA-Nav navigation PPO checkpoint."},
+        {"name": "--navigation_speed_scale", "type": float, "default": 1.0, "help": "Scale the navigation policy forward vx command during play."},
         
         {"name": "--no_wandb", "action": "store_true", "default": True, "help": "Disable logging to Weights and Biases (wandb)"},
         {"name": "--test", "action": "store_true", "default": False, "help": "Run in test mode (overrides some parameters for testing)"},
