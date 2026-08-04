@@ -1,12 +1,19 @@
 <mujoco model="sea-nav mixed course">
   <include file="go2.xml"/>
   <option timestep="0.002" gravity="0 0 -9.81"/>
+  <statistic center="8 0 0.5" extent="10"/>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.9 0.9 0.9"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
   <asset>
     <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0.1 0.1 0.1" width="512" height="3072"/>
     <material name="floor" rgba="0.25 0.35 0.28 1"/>
     <hfield name="rough" file="../height_field.png" size="2 1.5 .18 .12"/>
   </asset>
   <worldbody>
+    <light pos="4 -4 8" dir="-0.2 0.2 -1" directional="true" diffuse="0.8 0.8 0.8" specular="0.4 0.4 0.4"/>
     <geom name="floor" type="plane" size="30 5 .05" material="floor"/>
     <geom name="box_a" type="box" pos="2 .8 .25" size=".35 .35 .25"/>
     <geom name="box_b" type="box" pos="3 -.8 .3" size=".3 .3 .3"/>
