@@ -1,12 +1,15 @@
 """Static contract checks for the Isaac Gym hard-room evaluation path."""
 
 from pathlib import Path
+import shutil
 
 import pytest
 
 
 def test_hard_room_navigation_contract():
     pytest.importorskip("isaacgym")
+    if shutil.which("ninja") is None:
+        pytest.skip("Isaac Gym gymtorch extension tests require ninja")
     from legged_gym.envs.go2.go2_pos_config import Go2PosRoughCfg
 
     cfg = Go2PosRoughCfg
