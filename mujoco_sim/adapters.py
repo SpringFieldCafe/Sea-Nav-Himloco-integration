@@ -50,7 +50,7 @@ class MuJoCoStateAdapter(StateAdapter):
             distance = __import__("mujoco").mj_ray(
                 self.model, self.data, origin.reshape(3, 1), vec.reshape(3, 1),
                 np.ones((6, 1), dtype=np.uint8), 1, self.model.body("base").id, geom_id)
-            if distance >= 0:
+            if distance >= 0 and self.model.geom(geom_id[0]).bodyid == 0:
                 points.append(origin + vec * min(float(distance), 5.0))
         if not points:
             return np.full(41, 5.0, dtype=np.float32)
@@ -59,6 +59,21 @@ class MuJoCoStateAdapter(StateAdapter):
         rot = np.asarray(self.data.xmat[body_id]).reshape(3, 3)
         body_points = (np.asarray(points) - self.data.xpos[body_id]) @ rot
         return self.ray_adapter.project(body_points).numpy()[0]
+
+    def _obstacle_collision(self):
+        robot_ids = {i for i in range(self.model.ngeom) if self.model.geom(i).bodyid != 0}
+        terrain_prefixes = ("floor", "step", "stair", "rough_field", "hfield")
+        for contact in self.data.contact[:self.data.ncon]:
+            first, second = contact.geom1, contact.geom2
+            if first in robot_ids and second not in robot_ids:
+                other = self.model.geom(second).name or ""
+                if other and not other.startswith(terrain_prefixes):
+                    return True
+            if second in robot_ids and first not in robot_ids:
+                other = self.model.geom(first).name or ""
+                if other and not other.startswith(terrain_prefixes):
+                    return True
+        return False
 
     def read(self, goal_xy=None):
         body_id = self.model.body("base").id
@@ -78,7 +93,7 @@ class MuJoCoStateAdapter(StateAdapter):
                              position, rays, relative_goal.astype(np.float32),
                              roll, pitch, terrain_hint,
                              float(np.min(rays)),
-                             bool(self.data.ncon), abs(roll) > 1.0 or abs(pitch) > 1.0,
+                             self._obstacle_collision(), abs(roll) > 1.0 or abs(pitch) > 1.0,
                              time.monotonic())
         state.validate()
         return state
