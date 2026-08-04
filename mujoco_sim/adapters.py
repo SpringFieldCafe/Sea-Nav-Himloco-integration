@@ -52,6 +52,21 @@ class MuJoCoStateAdapter(StateAdapter):
             np.ones((6, 1), dtype=np.uint8), 1, self.model.body("base").id, geom_id)
         return float(distance), int(geom_id[0])
 
+    def _is_navigation_obstacle(self, geom_id):
+        """Exclude the floor and height-field tiles from obstacle rays.
+
+        The rough course is represented by hfield geoms.  Treating their
+        normal height variation as an obstacle makes grid2ray report the
+        terrain itself as a wall, which is outside the SEA-Nav training
+        convention and can make the policy stop or turn in place.
+        """
+        import mujoco
+        geom = self.model.geom(int(geom_id))
+        if geom.bodyid != 0:
+            return False
+        return geom.type not in (mujoco.mjtGeom.mjGEOM_PLANE,
+                                 mujoco.mjtGeom.mjGEOM_HFIELD)
+
     def _physical_rays(self):
         origin = np.asarray(self.data.xpos[self.model.body("base").id]) + np.array([0, 0, .05])
         angles = np.linspace(-2 * math.pi / 3, 2 * math.pi / 3, 41)
@@ -93,7 +108,7 @@ class MuJoCoStateAdapter(StateAdapter):
                 if distance < 0:
                     continue
                 surface_z = sample[2] - distance
-                if surface_z > ground_z + 0.1 and self.model.geom(geom_id).bodyid == 0:
+                if surface_z > ground_z + 0.1 and self._is_navigation_obstacle(geom_id):
                     values[i] = radius
                     break
         return values

@@ -15,6 +15,7 @@ from deploy.go2_onboard.model_loader import infer, load_himloco_policy, load_nav
 
 from .adapters import MuJoCoStateAdapter
 from .core import PolicyRuntimeCore
+from .supervisor import TerrainSupervisor
 from .visualization import WaypointVisualizer
 from .waypoints import WaypointManager
 
@@ -102,6 +103,10 @@ def main():
     parser.add_argument("--ray-mode", choices=("grid2ray", "physical_lidar"), default="grid2ray")
     parser.add_argument("--draw-goal", action="store_true")
     parser.add_argument("--stop-on-goal", action="store_true")
+    parser.add_argument("--speed-scale", type=float, default=1.0,
+                        help="scale terrain command limits, capped by HIMLoco bounds")
+    parser.add_argument("--command-filter-alpha", type=float, default=0.5,
+                        help="new-command weight in (0,1], larger is more responsive")
     args = parser.parse_args()
     np.random.seed(args.seed)
     if args.record and not args.viewer:
@@ -140,7 +145,13 @@ def main():
         if use_nav:
             nav = load_navigation_policy(args.navigation_policy, "", torch.device(args.device))
             him = load_himloco_policy(args.himloco_policy, torch.device(args.device))
-            core = PolicyRuntimeCore(nav, him, args.device)
+            core = PolicyRuntimeCore(
+                nav, him, args.device,
+                supervisor=TerrainSupervisor(
+                    speed_scale=args.speed_scale,
+                    command_filter_alpha=args.command_filter_alpha,
+                ),
+            )
             control_steps = max(1, int(round(0.02 / model.opt.timestep)))
             output = None
             stopped = False

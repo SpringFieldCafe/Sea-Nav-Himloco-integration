@@ -17,7 +17,15 @@ class TerrainState(str, Enum):
 class TerrainSupervisor:
     """Rules now use terrain truth; the input can later be a perception result."""
 
-    def __init__(self):
+    HARD_LIMITS = np.asarray([1.0, 1.0, 2.0], dtype=np.float32)
+
+    def __init__(self, speed_scale=1.0, command_filter_alpha=0.5):
+        if speed_scale <= 0:
+            raise ValueError("speed_scale must be positive")
+        if not 0.0 < command_filter_alpha <= 1.0:
+            raise ValueError("command_filter_alpha must be in (0, 1]")
+        self.speed_scale = float(speed_scale)
+        self.command_filter_alpha = float(command_filter_alpha)
         self.state = TerrainState.NAVIGATE
         self.last_command = np.zeros(3, dtype=np.float32)
 
@@ -36,23 +44,27 @@ class TerrainSupervisor:
         else:
             self.state = TerrainState.NAVIGATE
 
-        limits = {
+        base_limits = {
             TerrainState.NAVIGATE: (1.0, 1.0, 2.0),
-            TerrainState.APPROACH_STAIRS: (.35, .25, .5),
-            TerrainState.ALIGN_STAIRS: (.15, .12, .25),
-            TerrainState.STAIRS_UP: (.28, .12, .35),
-            TerrainState.STAIRS_DOWN: (.24, .10, .30),
-            TerrainState.ROUGH_TERRAIN: (.35, .20, .45),
+            TerrainState.APPROACH_STAIRS: (.45, .30, .60),
+            TerrainState.ALIGN_STAIRS: (.25, .18, .35),
+            TerrainState.STAIRS_UP: (.45, .15, .50),
+            TerrainState.STAIRS_DOWN: (.40, .12, .45),
+            TerrainState.ROUGH_TERRAIN: (.50, .25, .55),
             TerrainState.RECOVERY: (0.0, 0.0, 0.0),
             TerrainState.EMERGENCY_STOP: (0.0, 0.0, 0.0),
         }[self.state]
-        command = np.clip(np.asarray(raw_command, dtype=np.float32), -np.asarray(limits), limits)
+        limits = np.minimum(np.asarray(base_limits, dtype=np.float32) * self.speed_scale,
+                            self.HARD_LIMITS)
+        scaled_command = np.asarray(raw_command, dtype=np.float32) * self.speed_scale
+        command = np.clip(scaled_command, -limits, limits)
         if self.state == TerrainState.STAIRS_UP:
             # Stair risers can look like close obstacles to a flat-ground policy.
             # Keep a small forward bias so the robot climbs instead of reversing.
             command[0] = max(command[0], 0.12)
         elif self.state == TerrainState.STAIRS_DOWN:
             command[0] = max(command[0], 0.10)
-        command = .25 * command + .75 * self.last_command
+        command = (self.command_filter_alpha * command
+                   + (1.0 - self.command_filter_alpha) * self.last_command)
         self.last_command = command
         return command, self.state
