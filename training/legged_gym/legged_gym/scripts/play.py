@@ -96,19 +96,37 @@ def play(args):
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     obs = env.get_observations()
 
-    # load policy
-    train_cfg.runner.resume = True
-    train_cfg.runner.load_run = -1
-    train_cfg.runner.checkpoint = -1
-
-    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
-    policy = ppo_runner.get_inference_policy(device=env.device)
-    print('Loaded policy from: ', task_registry.loaded_policy_path)
+    # The deployment artifact is a critic-free TorchScript actor. Keep the
+    # original PPO-checkpoint path available for older training checkpoints.
+    navigation_module = None
+    navigation_path = os.path.abspath(args.navigation_checkpoint)
+    try:
+        navigation_module = torch.jit.load(navigation_path, map_location=env.device).eval()
+        print('Loaded TorchScript navigation policy from: ', navigation_path, flush=True)
+        with torch.inference_mode():
+            probe = navigation_module(obs.to(env.device))
+        if tuple(probe.shape) != (env.num_envs, env.num_nav_actions):
+            raise RuntimeError(
+                f"SEA-Nav TorchScript output must be {(env.num_envs, env.num_nav_actions)}, "
+                f"got {tuple(probe.shape)}"
+            )
+    except RuntimeError:
+        train_cfg.runner.resume = True
+        train_cfg.runner.load_run = -1
+        train_cfg.runner.checkpoint = -1
+        ppo_runner, train_cfg = task_registry.make_alg_runner(
+            env=env, name=args.task, args=args, train_cfg=train_cfg
+        )
+        policy = ppo_runner.get_inference_policy(device=env.device)
+        print('Loaded PPO navigation policy from: ', task_registry.loaded_policy_path, flush=True)
     print(f"Navigation forward speed scale: {args.navigation_speed_scale:.3f}")
 
     def navigation_policy(observations):
         with torch.inference_mode():
-            actions = policy(observations)
+            if navigation_module is not None:
+                actions = navigation_module(observations.to(env.device))
+            else:
+                actions = policy(observations)
         if actions.ndim != 2 or actions.shape[1] != env.num_nav_actions:
             raise RuntimeError(
                 f"SEA-Nav navigation policy must return [N,{env.num_nav_actions}], "
