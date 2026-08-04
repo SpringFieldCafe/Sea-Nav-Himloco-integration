@@ -35,15 +35,7 @@ def _terrain(scene):
     if scene != "mixed_course":
         return {"stairs_up": "stairs_up", "stairs_down": "stairs_down",
                 "rough": "rough"}.get(scene, "flat")
-    def mixed_hint(x):
-        if 4.5 <= x < 6.2:
-            return "stairs_up"
-        if 6.2 <= x < 9.8:
-            return "rough"
-        if 11.5 <= x < 13.0:
-            return "stairs_down"
-        return "flat"
-    return mixed_hint
+    return lambda _x: "rough"
 
 
 def _reset(model, data):
