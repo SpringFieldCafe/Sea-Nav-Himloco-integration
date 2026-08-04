@@ -222,6 +222,7 @@ def play(args):
                             "target_xy": env.last_episode_goal_xy[env_id].detach().cpu().tolist(),
                             "goal_reached": bool(env.last_episode_goal_reached[env_id].item()),
                             "collision": bool(env.last_episode_collision[env_id].item()),
+                            "collision_count": int(env.last_episode_collision_count[env_id].item()),
                             "fallen": bool(env.last_episode_fallen[env_id].item()),
                             "path_length": float(env.last_episode_path_length[env_id].item()),
                             "min_obstacle_distance": float(env.last_episode_min_obstacle_distance[env_id].item()),

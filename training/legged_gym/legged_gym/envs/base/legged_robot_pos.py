@@ -127,6 +127,7 @@ class LeggedRobotPos(LeggedRobot):
         self.episode_max_roll = torch.zeros(self.num_envs, device=device)
         self.episode_max_pitch = torch.zeros(self.num_envs, device=device)
         self.episode_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.episode_collision_count = torch.zeros(self.num_envs, dtype=torch.long, device=device)
         self.episode_fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
 
         self.last_episode_start_xy = torch.zeros(self.num_envs, 2, device=device)
@@ -137,6 +138,7 @@ class LeggedRobotPos(LeggedRobot):
         self.last_episode_max_roll = torch.zeros(self.num_envs, device=device)
         self.last_episode_max_pitch = torch.zeros(self.num_envs, device=device)
         self.last_episode_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.last_episode_collision_count = torch.zeros(self.num_envs, dtype=torch.long, device=device)
         self.last_episode_fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         self.last_episode_goal_reached = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         self.last_episode_steps = torch.zeros(self.num_envs, dtype=torch.long, device=device)
@@ -358,6 +360,7 @@ class LeggedRobotPos(LeggedRobot):
         self.last_episode_max_roll[env_ids] = self.episode_max_roll[env_ids]
         self.last_episode_max_pitch[env_ids] = self.episode_max_pitch[env_ids]
         self.last_episode_collision[env_ids] = self.episode_collision[env_ids]
+        self.last_episode_collision_count[env_ids] = self.episode_collision_count[env_ids]
         self.last_episode_fallen[env_ids] = self.episode_fallen[env_ids]
         self.last_episode_goal_reached[env_ids] = self.goal_reached_flag[env_ids]
         self.last_episode_steps[env_ids] = self.episode_length_buf[env_ids]
@@ -639,6 +642,7 @@ class LeggedRobotPos(LeggedRobot):
 
         self.collision_occurred |= new_collisions
         self.episode_collision |= new_collisions
+        self.episode_collision_count += is_new_collision.long()
         self.last_collision_active = new_collisions # Record current state for next frame
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
         self.fall_down = self.projected_gravity[:, 2] > -0.8
