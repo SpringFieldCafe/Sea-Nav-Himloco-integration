@@ -103,6 +103,9 @@ def main():
     args = parser.parse_args()
     np.random.seed(args.seed)
     import mujoco
+    mujoco_viewer = None
+    if args.viewer and not args.no_viewer:
+        import mujoco.viewer as mujoco_viewer
     model = mujoco.MjModel.from_xml_path(str(SCENES[args.scene]))
     data = mujoco.MjData(model)
     _reset(model, data)
@@ -112,7 +115,7 @@ def main():
     recorder = _Recorder(args.record, model) if args.record else None
     viewer_context = contextlib.nullcontext(None)
     if args.viewer and not args.no_viewer:
-        viewer_context = mujoco.viewer.launch_passive(model, data)
+        viewer_context = mujoco_viewer.launch_passive(model, data)
     with viewer_context as viewer:
         use_nav = bool(args.navigation_policy)
         if use_nav:
