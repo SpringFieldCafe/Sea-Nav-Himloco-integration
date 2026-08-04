@@ -46,8 +46,10 @@ class MuJoCoStateAdapter(StateAdapter):
         points = []
         for angle in angles:
             vec = np.array([math.cos(angle), math.sin(angle), 0.0])
-            distance, geom_id = __import__("mujoco").mj_ray(
-                self.model, self.data, origin, vec, np.ones(6, dtype=np.uint8), 1)
+            geom_id = np.zeros(1, dtype=np.int32)
+            distance = __import__("mujoco").mj_ray(
+                self.model, self.data, origin.reshape(3, 1), vec.reshape(3, 1),
+                np.ones((6, 1), dtype=np.uint8), 1, self.model.body("base").id, geom_id)
             if distance >= 0:
                 points.append(origin + vec * min(float(distance), 5.0))
         if not points:
@@ -88,6 +90,7 @@ class ROS2StateAdapter(StateAdapter):
     def __init__(self, reader, ray_adapter=None):
         self.reader = reader
         self.ray_adapter = ray_adapter or LidarRayAdapter(torch.device("cpu"))
+        self.motor_to_policy = make_motor_to_policy()
 
     def read(self, goal_xy):
         low, odom = self.reader.lowstate.value, self.reader.odom.value
@@ -96,7 +99,8 @@ class ROS2StateAdapter(StateAdapter):
         gravity, _, _ = _gravity_and_rpy(low.quaternion)
         rays = self.ray_adapter.project(low.lidar if hasattr(low, "lidar") else self.reader.lidar.value).numpy()[0]
         state = UnifiedState(gravity, odom.angular_velocity, odom.linear_velocity,
-                             low.q_motor, low.dq_motor, odom.position[:2],
+                             np.asarray(low.q_motor)[self.motor_to_policy],
+                             np.asarray(low.dq_motor)[self.motor_to_policy], odom.position[:2],
                              rays, np.asarray(goal_xy, dtype=np.float32))
         state.validate()
         return state
