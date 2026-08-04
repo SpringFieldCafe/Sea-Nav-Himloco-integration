@@ -29,10 +29,13 @@ class StateAdapter:
 class MuJoCoStateAdapter(StateAdapter):
     """Read named Go2 state and a 41-ray body-frame lidar from MuJoCo."""
 
-    def __init__(self, model, data, goal_xy, terrain_hint="flat"):
+    def __init__(self, model, data, goal_xy, terrain_hint="flat", ray_mode="grid2ray"):
         self.model, self.data = model, data
         self.goal_xy = np.asarray(goal_xy, dtype=np.float32)
         self.terrain_hint = terrain_hint
+        if ray_mode not in ("grid2ray", "physical_lidar"):
+            raise ValueError("ray_mode must be grid2ray or physical_lidar")
+        self.ray_mode = ray_mode
         self.joint_ids = [model.joint(name).id for name in (
             "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
             "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
@@ -40,17 +43,23 @@ class MuJoCoStateAdapter(StateAdapter):
             "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint")]
         self.ray_adapter = LidarRayAdapter(torch.device("cpu"))
 
-    def _rays(self):
+    def _ray(self, origin, direction):
+        import mujoco
+        geom_id = np.zeros(1, dtype=np.int32)
+        distance = mujoco.mj_ray(
+            self.model, self.data, np.asarray(origin, dtype=np.float64).reshape(3, 1),
+            np.asarray(direction, dtype=np.float64).reshape(3, 1),
+            np.ones((6, 1), dtype=np.uint8), 1, self.model.body("base").id, geom_id)
+        return float(distance), int(geom_id[0])
+
+    def _physical_rays(self):
         origin = np.asarray(self.data.xpos[self.model.body("base").id]) + np.array([0, 0, .05])
         angles = np.linspace(-2 * math.pi / 3, 2 * math.pi / 3, 41)
         points = []
         for angle in angles:
             vec = np.array([math.cos(angle), math.sin(angle), 0.0])
-            geom_id = np.zeros(1, dtype=np.int32)
-            distance = __import__("mujoco").mj_ray(
-                self.model, self.data, origin.reshape(3, 1), vec.reshape(3, 1),
-                np.ones((6, 1), dtype=np.uint8), 1, self.model.body("base").id, geom_id)
-            if distance >= 0 and self.model.geom(geom_id[0]).bodyid == 0:
+            distance, geom_id = self._ray(origin, vec)
+            if distance >= 0 and self.model.geom(geom_id).bodyid == 0:
                 points.append(origin + vec * min(float(distance), 5.0))
         if not points:
             return np.full(41, 5.0, dtype=np.float32)
@@ -59,6 +68,38 @@ class MuJoCoStateAdapter(StateAdapter):
         rot = np.asarray(self.data.xmat[body_id]).reshape(3, 3)
         body_points = (np.asarray(points) - self.data.xpos[body_id]) @ rot
         return self.ray_adapter.project(body_points).numpy()[0]
+
+    def _grid2ray(self):
+        """Approximate Isaac Gym grid2ray using MuJoCo terrain truth.
+
+        For each horizontal sample, cast a vertical ray and report the first
+        sample whose surface is at least 0.1 m above the local ground plane.
+        This preserves the trained 41-distance interface without changing the
+        SEA-Nav observation ordering.
+        """
+        body_id = self.model.body("base").id
+        body_pos = np.asarray(self.data.xpos[body_id])
+        rot = np.asarray(self.data.xmat[body_id]).reshape(3, 3)
+        ground_origin = body_pos + np.array([0, 0, 2.0])
+        ground_distance, _ = self._ray(ground_origin, [0, 0, -1])
+        ground_z = ground_origin[2] - ground_distance if ground_distance >= 0 else 0.0
+        values = np.full(41, 5.0, dtype=np.float32)
+        angles = np.linspace(-2 * math.pi / 3, 2 * math.pi / 3, 41)
+        for i, angle in enumerate(angles):
+            direction = rot @ np.array([math.cos(angle), math.sin(angle), 0.0])
+            for radius in np.arange(0.1, 5.01, 0.1):
+                sample = body_pos + direction * radius + np.array([0, 0, 2.0])
+                distance, geom_id = self._ray(sample, [0, 0, -1])
+                if distance < 0:
+                    continue
+                surface_z = sample[2] - distance
+                if surface_z > ground_z + 0.1 and self.model.geom(geom_id).bodyid == 0:
+                    values[i] = radius
+                    break
+        return values
+
+    def _rays(self):
+        return self._grid2ray() if self.ray_mode == "grid2ray" else self._physical_rays()
 
     def _obstacle_collision(self):
         robot_ids = {i for i in range(self.model.ngeom) if self.model.geom(i).bodyid != 0}
@@ -94,7 +135,7 @@ class MuJoCoStateAdapter(StateAdapter):
                              roll, pitch, terrain_hint,
                              float(np.min(rays)),
                              self._obstacle_collision(), abs(roll) > 1.0 or abs(pitch) > 1.0,
-                             time.monotonic())
+                             time.monotonic(), {"ray_mode": self.ray_mode})
         state.validate()
         return state
 

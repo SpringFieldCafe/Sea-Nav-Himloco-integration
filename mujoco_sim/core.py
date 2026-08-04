@@ -33,6 +33,12 @@ class PolicyRuntimeCore:
         self.him_observation.reset()
         self.supervisor.last_command[:] = 0
 
+    def stop_output(self, supervisor_state="GOAL_REACHED"):
+        zeros3 = np.zeros(3, dtype=np.float32)
+        zeros12 = np.zeros(12, dtype=np.float32)
+        return RuntimeOutput(zeros3, zeros3, zeros12, supervisor_state,
+                             diagnostics={"motor_action": zeros12.copy()})
+
     def step(self, state):
         state.validate()
         now = time.perf_counter()

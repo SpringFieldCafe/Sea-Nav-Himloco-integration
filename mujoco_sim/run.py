@@ -15,6 +15,8 @@ from deploy.go2_onboard.model_loader import infer, load_himloco_policy, load_nav
 
 from .adapters import MuJoCoStateAdapter
 from .core import PolicyRuntimeCore
+from .visualization import WaypointVisualizer
+from .waypoints import WaypointManager
 
 
 ROOT = Path(__file__).resolve().parent
@@ -103,6 +105,11 @@ def main():
     parser.add_argument("--no-viewer", action="store_true")
     parser.add_argument("--record", default="")
     parser.add_argument("--log", default="")
+    parser.add_argument("--waypoints", default="")
+    parser.add_argument("--goal-radius", type=float, default=0.5)
+    parser.add_argument("--ray-mode", choices=("grid2ray", "physical_lidar"), default="grid2ray")
+    parser.add_argument("--draw-goal", action="store_true")
+    parser.add_argument("--stop-on-goal", action="store_true")
     args = parser.parse_args()
     np.random.seed(args.seed)
     if args.record and not args.viewer:
@@ -114,7 +121,15 @@ def main():
     model = mujoco.MjModel.from_xml_path(str(SCENES[args.scene]))
     data = mujoco.MjData(model)
     _reset(model, data)
-    adapter = MuJoCoStateAdapter(model, data, [args.goal_x, args.goal_y], _terrain(args.scene))
+    waypoint_path = args.waypoints
+    if not waypoint_path and args.scene == "mixed_course":
+        default_waypoints = Path("configs/mixed_course_waypoints.json")
+        if default_waypoints.exists():
+            waypoint_path = str(default_waypoints)
+    waypoints = (WaypointManager.from_json(waypoint_path, args.goal_radius)
+                 if waypoint_path else
+                 WaypointManager.single(args.goal_x, args.goal_y, args.goal_radius))
+    adapter = MuJoCoStateAdapter(model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode)
     records = []
     started = time.perf_counter()
     if args.log:
@@ -126,6 +141,9 @@ def main():
     if args.viewer and not args.no_viewer:
         viewer_context = mujoco_viewer.launch_passive(model, data)
     with viewer_context as viewer:
+        waypoint_visualizer = None
+        if viewer is not None and (args.draw_goal or waypoint_path):
+            waypoint_visualizer = WaypointVisualizer(viewer, waypoints.waypoints)
         use_nav = bool(args.navigation_policy)
         if use_nav:
             nav = load_navigation_policy(args.navigation_policy, "", torch.device(args.device))
@@ -133,12 +151,23 @@ def main():
             core = PolicyRuntimeCore(nav, him, args.device)
             control_steps = max(1, int(round(0.02 / model.opt.timestep)))
             output = None
+            stopped = False
+            waypoint_was_reached = False
             target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5])
             for step in range(args.steps):
                 if step % control_steps == 0:
-                    state = adapter.read([args.goal_x, args.goal_y])
-                    output = core.step(state)
+                    state = adapter.read(waypoints.current.xy)
+                    waypoint_was_reached = waypoints.update(state.position_xy)
+                    if waypoint_was_reached and waypoints.done and args.stop_on_goal:
+                        output = core.stop_output()
+                        stopped = True
+                    else:
+                        if waypoint_was_reached:
+                            state = adapter.read(waypoints.current.xy)
+                        output = core.step(state)
                     target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]) + output.himloco_action * .25
+                    if stopped:
+                        target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5])
                 q, dq = data.qpos[7:19], data.qvel[6:18]
                 data.ctrl[:] = 20 * (target - q) - .5 * dq
                 mujoco.mj_step(model, data)
@@ -150,8 +179,27 @@ def main():
                                     "control_hz": output.control_hz,
                                     "position_xy": state.position_xy.tolist(), "roll": state.roll,
                                     "pitch": state.pitch, "min_obstacle_distance": state.min_obstacle_distance,
-                                    "collision": state.collision, "fallen": state.fallen})
+                                    "collision": state.collision, "fallen": state.fallen,
+                                    "ray_mode": args.ray_mode,
+                                    "waypoint_index": waypoints.current_index,
+                                    "waypoints_total": waypoints.total,
+                                    "target_xy": waypoints.current.xy.tolist(),
+                                    "target_relative_xy": state.goal_xy.tolist(),
+                                    "target_distance": waypoints.distance(state.position_xy),
+                                    "waypoint_reached": waypoint_was_reached,
+                                    "goal_reached": waypoints.done})
+                if stopped and args.stop_on_goal:
+                    break
                 if viewer is not None:
+                    if waypoint_visualizer is not None and output is not None:
+                        waypoint_visualizer.sync(
+                            waypoints.current_index,
+                            waypoints.distance(state.position_xy),
+                            output.supervisor_state,
+                            output.raw_command,
+                            output.supervised_command,
+                            waypoints.done,
+                        )
                     viewer.sync()
                 if recorder is not None and step % control_steps == 0:
                     recorder.write(model, data)
@@ -164,7 +212,7 @@ def main():
             for record in records:
                 handle.write(json.dumps(record) + "\n")
     elapsed = time.perf_counter() - started
-    state = adapter.read([args.goal_x, args.goal_y])
+    state = adapter.read(waypoints.current.xy)
     positions = np.asarray([r["position_xy"] for r in records if "position_xy" in r], dtype=np.float32)
     path_length = float(np.linalg.norm(np.diff(positions, axis=0), axis=1).sum()) if len(positions) > 1 else 0.0
     max_roll = max((abs(float(r["roll"])) for r in records if "roll" in r), default=abs(state.roll))
@@ -173,11 +221,16 @@ def main():
     collision = any(r.get("collision", False) for r in records) or state.collision
     fallen = any(r.get("fallen", False) for r in records) or state.fallen
     summary = {"scene": args.scene, "seed": args.seed, "steps": args.steps,
-               "elapsed_s": elapsed, "goal_reached": float(np.linalg.norm(state.goal_xy)) < .45,
+               "elapsed_s": elapsed, "goal_reached": waypoints.done,
                "fallen": fallen, "collision": collision,
                "terrain": state.terrain_hint, "path_length": path_length,
                "max_roll": max_roll, "max_pitch": max_pitch,
-               "min_obstacle_distance": min_distance}
+               "min_obstacle_distance": min_distance,
+               "ray_mode": args.ray_mode,
+               "waypoints_total": waypoints.total,
+               "waypoints_reached": len(waypoints.reached_indices),
+               "current_waypoint_index": waypoints.current_index,
+               "stop_on_goal": args.stop_on_goal}
     print(json.dumps(summary, sort_keys=True))
 
 
