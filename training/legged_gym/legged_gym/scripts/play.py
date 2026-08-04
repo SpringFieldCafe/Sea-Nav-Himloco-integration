@@ -28,6 +28,11 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 import sys
+from pathlib import Path
+
+LOCAL_LEGGED_GYM_ROOT = Path(__file__).resolve().parents[2]
+if str(LOCAL_LEGGED_GYM_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOCAL_LEGGED_GYM_ROOT))
 
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
@@ -54,7 +59,7 @@ def play(args):
     # overwrite some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     
-    env_cfg.terrain.terrain_types = ['hard_room']  
+    env_cfg.terrain.terrain_types = ['hard_room_rough']
     env_cfg.terrain.terrain_proportions = [1.0]
     env_cfg.asset.file = '{LEGGED_GYM_ROOT_DIR}/resources/go2_description/urdf/go2_description.urdf'
     env_cfg.replay.enable_collision_replay = False

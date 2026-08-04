@@ -347,4 +347,17 @@ class Terrain:
     def hard_room_terrain_func(self, terrain, difficulty):
         hard_room = create_rand_room(9, grid_size=20, target_size=self.length_per_env_pixels, min_distance=2, set_pos=False) # 100*100, obstacle height 0.2m ~ 1.0m
         terrain.height_field_raw = hard_room * int(1. / terrain.vertical_scale) # terrain.vertical_scale = 0.005, so height_field_raw = hard_room * 200 
-    
+
+    def hard_room_rough_terrain_func(self, terrain, difficulty):
+        """Keep the original hard-room layout and add low-amplitude roughness."""
+        hard_room = create_rand_room(
+            9, grid_size=20, target_size=self.length_per_env_pixels,
+            min_distance=2, set_pos=False,
+        )
+        obstacle_height = hard_room * int(1. / terrain.vertical_scale)
+        rough_height = np.random.uniform(
+            -0.02, 0.02, terrain.height_field_raw.shape
+        ) / terrain.vertical_scale
+        terrain.height_field_raw = np.rint(
+            obstacle_height + rough_height
+        ).astype(np.int16)
