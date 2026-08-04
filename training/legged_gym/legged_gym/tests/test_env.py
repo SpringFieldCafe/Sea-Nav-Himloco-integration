@@ -28,6 +28,13 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import sys
+from pathlib import Path
+
+LOCAL_LEGGED_GYM_ROOT = Path(__file__).resolve().parents[2]
+if str(LOCAL_LEGGED_GYM_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOCAL_LEGGED_GYM_ROOT))
+
 import numpy as np
 import os
 from datetime import datetime
