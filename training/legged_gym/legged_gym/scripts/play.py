@@ -29,6 +29,13 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 import sys
 import json
+from pathlib import Path
+
+# Prefer the legged_gym package checked out beside this script over an older
+# editable install from another worktree.
+LOCAL_LEGGED_GYM_ROOT = Path(__file__).resolve().parents[2]
+if str(LOCAL_LEGGED_GYM_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOCAL_LEGGED_GYM_ROOT))
 
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
