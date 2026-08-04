@@ -52,6 +52,29 @@ python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_
 python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode physical_lidar --goal-radius 0.6 --stop-on-goal --no-viewer --log logs/mixed_course_lidar.jsonl
 ```
 
+## Speed tuning
+
+The faster-control branch keeps the HIMLoco contract unchanged and adjusts only
+the terrain supervisor. The default terrain limits are now `stairs_up vx=0.45`,
+`stairs_down vx=0.40`, and `rough vx=0.50`; flat navigation remains capped at
+`vx=1.0`. The command filter uses `alpha=0.5`, so it responds faster than the
+original `0.25` setting.
+
+Manual runtime tuning:
+
+```bash
+# Faster terrain commands, still capped by [-1,1] / [-1,1] / [-2,2].
+python -m mujoco_sim.run ... --speed-scale 1.15 --command-filter-alpha 0.65
+
+# More conservative terrain behavior.
+python -m mujoco_sim.run ... --speed-scale 0.75 --command-filter-alpha 0.35
+```
+
+`--speed-scale` changes terrain supervisor command limits only. It does not
+change policy weights, PD gains, action scale, timestep, or observation order.
+`--command-filter-alpha` is the weight of the new command; larger values are
+more responsive and smaller values are smoother.
+
 SEA-Nav uses the existing 55-value frame and 10-frame history, including 41
 projected rays, then clips commands to `vx [-1,1]`, `vy [-1,1]`, `wz [-2,2]`.
 The terrain supervisor applies stricter limits on stairs and rough terrain.
