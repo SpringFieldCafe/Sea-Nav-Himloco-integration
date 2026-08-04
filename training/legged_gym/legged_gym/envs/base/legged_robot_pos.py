@@ -71,6 +71,7 @@ class LeggedRobotPos(LeggedRobot):
         self.locomotion_backend = make_locomotion_backend(
             self, getattr(self.cfg.locomotion, "backend", "slr")
         )
+        self._init_navigation_metrics()
 
         # Replay and Collision History Init
         self._init_replay_buffers()
@@ -114,6 +115,31 @@ class LeggedRobotPos(LeggedRobot):
         self.stay_timer = torch.zeros(self.num_envs, device=self.device, dtype=torch.int) 
         self.goal_reached_flag = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)  
         self.stand_still_flag = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+
+    def _init_navigation_metrics(self):
+        """Keep episode telemetry available before automatic environment reset."""
+        device = self.device
+        self.episode_start_xy = torch.zeros(self.num_envs, 2, device=device)
+        self.episode_start_yaw = torch.zeros(self.num_envs, device=device)
+        self.episode_last_position = torch.zeros(self.num_envs, 2, device=device)
+        self.episode_path_length = torch.zeros(self.num_envs, device=device)
+        self.episode_min_obstacle_distance = torch.full((self.num_envs,), 5.0, device=device)
+        self.episode_max_roll = torch.zeros(self.num_envs, device=device)
+        self.episode_max_pitch = torch.zeros(self.num_envs, device=device)
+        self.episode_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.episode_fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+
+        self.last_episode_start_xy = torch.zeros(self.num_envs, 2, device=device)
+        self.last_episode_start_yaw = torch.zeros(self.num_envs, device=device)
+        self.last_episode_goal_xy = torch.zeros(self.num_envs, 2, device=device)
+        self.last_episode_path_length = torch.zeros(self.num_envs, device=device)
+        self.last_episode_min_obstacle_distance = torch.full((self.num_envs,), 5.0, device=device)
+        self.last_episode_max_roll = torch.zeros(self.num_envs, device=device)
+        self.last_episode_max_pitch = torch.zeros(self.num_envs, device=device)
+        self.last_episode_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.last_episode_fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.last_episode_goal_reached = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        self.last_episode_steps = torch.zeros(self.num_envs, dtype=torch.long, device=device)
 
     def _init_replay_buffers(self):
         """ Initialize buffers for state replay and collision tracking. """
@@ -321,6 +347,20 @@ class LeggedRobotPos(LeggedRobot):
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
             return
+
+        # Capture terminal values before reset_idx replaces the root state and
+        # clears collision/action histories.
+        self.last_episode_start_xy[env_ids] = self.episode_start_xy[env_ids]
+        self.last_episode_start_yaw[env_ids] = self.episode_start_yaw[env_ids]
+        self.last_episode_goal_xy[env_ids] = self.position_targets[env_ids, :2]
+        self.last_episode_path_length[env_ids] = self.episode_path_length[env_ids]
+        self.last_episode_min_obstacle_distance[env_ids] = self.episode_min_obstacle_distance[env_ids]
+        self.last_episode_max_roll[env_ids] = self.episode_max_roll[env_ids]
+        self.last_episode_max_pitch[env_ids] = self.episode_max_pitch[env_ids]
+        self.last_episode_collision[env_ids] = self.episode_collision[env_ids]
+        self.last_episode_fallen[env_ids] = self.episode_fallen[env_ids]
+        self.last_episode_goal_reached[env_ids] = self.goal_reached_flag[env_ids]
+        self.last_episode_steps[env_ids] = self.episode_length_buf[env_ids]
             
         # Separate Normal vs Replay
         # Only replay if ENABLED in config and at least one collision occurred 
@@ -375,6 +415,19 @@ class LeggedRobotPos(LeggedRobot):
         self.last_collision_active[env_ids] = False
         self.num_collisions[env_ids] = 0 # Reset collision count for visualization
         self.collision_pos_hist[env_ids] = 0 # Clear history
+
+        self.episode_start_xy[env_ids] = self.root_states[env_ids, :2]
+        self.episode_start_yaw[env_ids] = torch.atan2(
+            2.0 * (self.root_states[env_ids, 3] * self.root_states[env_ids, 6]),
+            1.0 - 2.0 * self.root_states[env_ids, 6] ** 2,
+        )
+        self.episode_last_position[env_ids] = self.root_states[env_ids, :2]
+        self.episode_path_length[env_ids] = 0.0
+        self.episode_min_obstacle_distance[env_ids] = 5.0
+        self.episode_max_roll[env_ids] = 0.0
+        self.episode_max_pitch[env_ids] = 0.0
+        self.episode_collision[env_ids] = False
+        self.episode_fallen[env_ids] = False
         
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
@@ -439,6 +492,24 @@ class LeggedRobotPos(LeggedRobot):
         self.distance = torch.norm(self.position_targets[:, :2] - self.root_states[:, :2], dim=1)
         self.far_goal = (self.distance > 0.5)
         self._get_rays()
+
+        current_position = self.root_states[:, :2]
+        self.episode_path_length += torch.linalg.norm(
+            current_position - self.episode_last_position, dim=1
+        )
+        self.episode_last_position = current_position.clone()
+        self.episode_min_obstacle_distance = torch.minimum(
+            self.episode_min_obstacle_distance, self.rays.min(dim=1).values
+        )
+        gravity_x = self.projected_gravity[:, 0]
+        gravity_y = self.projected_gravity[:, 1]
+        gravity_z = self.projected_gravity[:, 2].clamp(max=-1e-6)
+        roll = torch.atan2(gravity_y, -gravity_z).abs()
+        pitch = torch.atan2(
+            gravity_x.abs(), torch.sqrt(gravity_y.square() + gravity_z.square())
+        )
+        self.episode_max_roll = torch.maximum(self.episode_max_roll, roll)
+        self.episode_max_pitch = torch.maximum(self.episode_max_pitch, pitch)
 
     def _get_rays(self, env_ids=None):
         """ Samples heights of the terrain at required points around each robot.
@@ -567,9 +638,11 @@ class LeggedRobotPos(LeggedRobot):
             self._update_collision_hist(new_collisions)
 
         self.collision_occurred |= new_collisions
+        self.episode_collision |= new_collisions
         self.last_collision_active = new_collisions # Record current state for next frame
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
         self.fall_down = self.projected_gravity[:, 2] > -0.8
+        self.episode_fallen |= self.fall_down
         
         # Stricter static (stuck) condition:
         # Either very low velocity OR very small displacement in the last ~100 steps

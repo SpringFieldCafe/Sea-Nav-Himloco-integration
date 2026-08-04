@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 import sys
+import json
 
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
@@ -52,7 +53,10 @@ def play(args):
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # overwrite some parameters for testing
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
+    if args.viewer:
+        env_cfg.env.num_envs = 1
+    elif args.num_envs is not None:
+        env_cfg.env.num_envs = args.num_envs
     
     env_cfg.terrain.terrain_types = ['hard_room']  
     env_cfg.terrain.terrain_proportions = [1.0]
@@ -64,11 +68,11 @@ def play(args):
             "guidance_navigation": ["guide", "guide_ray_marker"],
         }
     
-    if env_cfg.env.num_envs == 1:
+    if args.viewer:
         env_cfg.terrain.num_rows = 1 # level  
         env_cfg.terrain.num_cols = 1 # type
-        env_cfg.terrain.curriculum = True
-        env_cfg.terrain.max_init_terrain_level = 3
+        env_cfg.terrain.curriculum = False
+        env_cfg.terrain.max_init_terrain_level = 0
     
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_friction = False
@@ -79,7 +83,7 @@ def play(args):
     env_cfg.env.episode_length_s = 40
     env_cfg.env.stay_time = 500
     env_cfg.env.debug_viz = True
-    env_cfg.asset.terminate_after_contacts_on = [] # no termination
+    # Keep the configured base/head fall termination active for evaluation.
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -121,68 +125,102 @@ def play(args):
 
     RECORD_VIDEO = False
     SAVE_IMAGES = False
-    TOTAL_EPISODES = 10
+    total_episodes = args.eval_episodes
+    if total_episodes <= 0:
+        raise ValueError("--eval_episodes must be greater than zero")
+    max_steps = args.eval_steps or (10 * int(env.max_episode_length))
+    if max_steps <= 0:
+        raise ValueError("--eval_steps must be greater than zero")
+    if args.eval_log_interval <= 0:
+        raise ValueError("--eval_log_interval must be greater than zero")
+    eval_handle = None
+    if args.eval_log:
+        os.makedirs(os.path.dirname(os.path.abspath(args.eval_log)), exist_ok=True)
+        eval_handle = open(args.eval_log, "w", encoding="utf-8")
     video = None
     current_frame = 0
     max_frames = 20000
 
-    env.reset()
     obs, _ = env.reset()
     episode_count = 0
+    wall_step_start = time.perf_counter()
 
-    with torch.inference_mode():
-        for i in range(100 * int(env.max_episode_length)):
+    try:
+        with torch.inference_mode():
+            for i in range(max_steps):
+                step_start = time.perf_counter()
+                position_before = env.root_states[:, :2].detach().clone()
             # Step the environment
-            actions = navigation_policy(obs.detach())
-            actions[:, 0] *= args.navigation_speed_scale
-            obs, _, rews, dones, infos = env.step(actions)
-            env.gym.set_camera_location(camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0), gymapi.Vec3(4.99, 5.0, 0.0))
+                actions = navigation_policy(obs.detach())
+                actions[:, 0] *= args.navigation_speed_scale
+                raw_actions = actions.detach().clone()
+                obs, _, rews, dones, infos = env.step(actions)
+                if args.viewer:
+                    env.gym.set_camera_location(camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0), gymapi.Vec3(4.99, 5.0, 0.0))
 
-            if dones.any():
-                episode_count += 1
-                print(f"============== Episode {episode_count} Finished ============== ")
+                if eval_handle is not None and i % args.eval_log_interval == 0:
+                    env_idx = 0
+                    eval_handle.write(json.dumps({
+                        "type": "step",
+                        "step": i,
+                        "env_index": env_idx,
+                        "seed": args.seed,
+                        "terrain": "hard_room",
+                        "position_xy": env.root_states[env_idx, :2].detach().cpu().tolist(),
+                        "position_before_xy": position_before[env_idx].cpu().tolist(),
+                        "target_xy": env.position_targets[env_idx, :2].detach().cpu().tolist(),
+                        "target_relative_xy": env.goal_local_pos[env_idx].detach().cpu().tolist(),
+                        "target_distance": float(env.distance[env_idx].item()),
+                        "raw_command": raw_actions[env_idx].cpu().tolist(),
+                        "filtered_command": env.nav_actions_after_clip[env_idx].detach().cpu().tolist(),
+                        "himloco_action": env.actions_orig[env_idx].detach().cpu().tolist(),
+                        "ray_min_distance": float(env.rays[env_idx].min().item()),
+                        "roll_proxy": float(env.episode_max_roll[env_idx].item()),
+                        "pitch_proxy": float(env.episode_max_pitch[env_idx].item()),
+                        "control_hz": 1.0 / env.dt,
+                        "wall_control_hz": 1.0 / max(time.perf_counter() - step_start, 1e-6),
+                    }) + "\n")
 
-            if episode_count == TOTAL_EPISODES:
-                print(f"Reached {TOTAL_EPISODES} episodes, stopping.")
-                if video is not None:
-                    video.release()  
-                break           
+                if dones.any():
+                    done_ids = dones.nonzero(as_tuple=False).flatten()
+                    for env_id in done_ids.tolist():
+                        episode_count += 1
+                        summary = {
+                            "type": "episode",
+                            "episode": episode_count,
+                            "seed": args.seed,
+                            "env_index": env_id,
+                            "terrain": "hard_room",
+                            "start_xy": env.last_episode_start_xy[env_id].detach().cpu().tolist(),
+                            "start_yaw": float(env.last_episode_start_yaw[env_id].item()),
+                            "target_xy": env.last_episode_goal_xy[env_id].detach().cpu().tolist(),
+                            "goal_reached": bool(env.last_episode_goal_reached[env_id].item()),
+                            "collision": bool(env.last_episode_collision[env_id].item()),
+                            "fallen": bool(env.last_episode_fallen[env_id].item()),
+                            "path_length": float(env.last_episode_path_length[env_id].item()),
+                            "min_obstacle_distance": float(env.last_episode_min_obstacle_distance[env_id].item()),
+                            "max_roll": float(env.last_episode_max_roll[env_id].item()),
+                            "max_pitch": float(env.last_episode_max_pitch[env_id].item()),
+                            "steps": int(env.last_episode_steps[env_id].item()),
+                            "sim_time_s": float(env.last_episode_steps[env_id].item() * env.dt),
+                        }
+                        if eval_handle is not None:
+                            eval_handle.write(json.dumps(summary) + "\n")
+                        print(json.dumps(summary, sort_keys=True), flush=True)
+                    if eval_handle is not None:
+                        eval_handle.flush()
 
-            # Recording Logic
-            if (RECORD_VIDEO or SAVE_IMAGES) and current_frame < max_frames:
-                env.gym.render_all_camera_sensors(env.sim)
-                img = env.gym.get_camera_image(env.sim, env.envs[0], camera_handle, gymapi.IMAGE_COLOR)
-                img = img.reshape((camera_props.height, camera_props.width, 4))[:, :, :3]
-                
-                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                if episode_count >= total_episodes:
+                    print(f"Reached {total_episodes} episodes, stopping.", flush=True)
+                    break
 
-                if RECORD_VIDEO:
-                    if video is None:
-                        fps = 50
-                        output_path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', f"{train_cfg.runner.load_run}_{train_cfg.runner.checkpoint}.mp4")
-                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                        video = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (camera_props.width, camera_props.height))
-                        print(f"Recording video to {output_path}")
-                    video.write(img_bgr)
-
-                if SAVE_IMAGES:
-                    img_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'frames')
-                    os.makedirs(img_dir, exist_ok=True)
-                    cv2.imwrite(os.path.join(img_dir, f"frame_{current_frame:04d}.png"), img_bgr)
-
-                current_frame += 1
-                if current_frame % 100 == 0:
-                    print(f"Recorded {current_frame}/{max_frames} frames")
-            
-            elif (RECORD_VIDEO or SAVE_IMAGES) and current_frame >= max_frames:
-                if video is not None:
-                    video.release()
-                    video = None
-                RECORD_VIDEO = False
-                SAVE_IMAGES = False
+            # Video recording remains opt-in and is intentionally separate from
+            # the JSONL evaluation path.
+    finally:
+        if eval_handle is not None:
+            eval_handle.close()
 
 
 if __name__ == '__main__':
     args = get_args()
-    args.headless = False
     play(args)

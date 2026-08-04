@@ -176,6 +176,10 @@ def get_args():
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
         {"name": "--navigation_checkpoint", "type": str, "default": None, "help": "Direct path to a SEA-Nav navigation PPO checkpoint."},
         {"name": "--navigation_speed_scale", "type": float, "default": 1.0, "help": "Scale the navigation policy forward vx command during play."},
+        {"name": "--eval_log", "type": str, "default": None, "help": "Write Isaac Gym navigation step and episode JSONL metrics."},
+        {"name": "--eval_episodes", "type": int, "default": 10, "help": "Stop play after this many completed episodes."},
+        {"name": "--eval_steps", "type": int, "default": None, "help": "Maximum play control steps."},
+        {"name": "--eval_log_interval", "type": int, "default": 1, "help": "Write one step record every N control steps."},
         
         {"name": "--no_wandb", "action": "store_true", "default": True, "help": "Disable logging to Weights and Biases (wandb)"},
         {"name": "--test", "action": "store_true", "default": False, "help": "Run in test mode (overrides some parameters for testing)"},
