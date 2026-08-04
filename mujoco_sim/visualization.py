@@ -27,7 +27,6 @@ class WaypointVisualizer:
                           ([0.9, 0.2, 0.15, 1.0] if index == current_index else
                            [0.2, 0.45, 0.95, 0.7])))
             scene.ngeom += 1
-        label = "SEA-Nav waypoint"
         text = (
             f"index={current_index + 1}/{len(self.waypoints)}  "
             f"distance={distance:.2f} m\n"
@@ -35,4 +34,12 @@ class WaypointVisualizer:
             f"raw=[{raw_command[0]:+.2f}, {raw_command[1]:+.2f}, {raw_command[2]:+.2f}]\n"
             f"supervised=[{supervised_command[0]:+.2f}, {supervised_command[1]:+.2f}, {supervised_command[2]:+.2f}]"
         )
-        self.viewer.add_overlay(self.mujoco.mjtGridPos.mjGRID_TOPLEFT, label, text)
+        if scene.ngeom < scene.maxgeom:
+            label_geom = scene.geoms[scene.ngeom]
+            current = self.waypoints[min(current_index, len(self.waypoints) - 1)]
+            self.mujoco.mjv_initGeom(
+                label_geom, self.mujoco.mjtGeom.mjGEOM_LABEL,
+                np.zeros(3), np.array([current.x, current.y, 0.55]), identity,
+                np.array([1.0, 1.0, 1.0, 1.0]))
+            label_geom.label = text[:99]
+            scene.ngeom += 1
