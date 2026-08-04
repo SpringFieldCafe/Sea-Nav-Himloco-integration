@@ -15,8 +15,8 @@
   <worldbody>
     <light pos="4 -4 8" dir="-0.2 0.2 -1" directional="true" diffuse="0.8 0.8 0.8" specular="0.4 0.4 0.4"/>
     <geom name="floor" type="plane" size="30 5 .05" material="floor"/>
-    <geom name="box_a" type="box" pos="2 .8 .25" size=".35 .35 .25"/>
-    <geom name="box_b" type="box" pos="3 -.8 .3" size=".3 .3 .3"/>
+    <geom name="box_a" type="box" pos="1.6 0.6 .25" size=".35 .35 .25"/>
+    <geom name="box_b" type="box" pos="1.8 -0.9 .3" size=".3 .3 .3"/>
     <geom name="stair_up_1" type="box" pos="5 .0 .075" size=".15 1.0 .075"/>
     <geom name="stair_up_2" type="box" pos="5.3 .0 .15" size=".15 1.0 .15"/>
     <geom name="stair_up_3" type="box" pos="5.6 .0 .225" size=".15 1.0 .225"/>

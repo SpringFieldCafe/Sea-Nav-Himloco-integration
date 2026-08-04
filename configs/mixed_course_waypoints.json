@@ -1,5 +1,5 @@
 [
-  {"x": 2.0, "y": 0.0, "radius": 0.5, "terrain": "flat"},
+  {"x": 4.0, "y": 0.0, "radius": 0.6, "terrain": "flat"},
   {"x": 5.8, "y": 0.0, "radius": 0.5, "terrain": "stairs_up"},
   {"x": 9.5, "y": 0.0, "radius": 0.5, "terrain": "rough"},
   {"x": 10.8, "y": 0.0, "radius": 0.5, "terrain": "flat"},
