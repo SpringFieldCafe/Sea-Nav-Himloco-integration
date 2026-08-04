@@ -355,8 +355,10 @@ class Terrain:
             min_distance=2, set_pos=False,
         )
         obstacle_height = hard_room * int(1. / terrain.vertical_scale)
+        roughness_peak_m = 0.035
         rough_height = np.random.uniform(
-            -0.02, 0.02, terrain.height_field_raw.shape
+            -roughness_peak_m, roughness_peak_m,
+            terrain.height_field_raw.shape,
         ) / terrain.vertical_scale
         terrain.height_field_raw = np.rint(
             obstacle_height + rough_height
