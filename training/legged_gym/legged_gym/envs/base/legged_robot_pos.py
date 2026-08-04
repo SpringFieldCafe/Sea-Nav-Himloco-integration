@@ -430,6 +430,7 @@ class LeggedRobotPos(LeggedRobot):
         self.episode_max_roll[env_ids] = 0.0
         self.episode_max_pitch[env_ids] = 0.0
         self.episode_collision[env_ids] = False
+        self.episode_collision_count[env_ids] = 0
         self.episode_fallen[env_ids] = False
         
         self.extras["episode"] = {}
