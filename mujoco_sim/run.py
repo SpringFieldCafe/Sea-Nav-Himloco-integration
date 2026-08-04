@@ -1,6 +1,9 @@
 import argparse
 import contextlib
 import json
+import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -102,6 +105,8 @@ def main():
     parser.add_argument("--log", default="")
     args = parser.parse_args()
     np.random.seed(args.seed)
+    if args.record and not args.viewer:
+        os.environ.setdefault("MUJOCO_GL", "egl")
     import mujoco
     mujoco_viewer = None
     if args.viewer and not args.no_viewer:
@@ -112,6 +117,10 @@ def main():
     adapter = MuJoCoStateAdapter(model, data, [args.goal_x, args.goal_y], _terrain(args.scene))
     records = []
     started = time.perf_counter()
+    if args.log:
+        Path(args.log).parent.mkdir(parents=True, exist_ok=True)
+    if args.record:
+        Path(args.record).parent.mkdir(parents=True, exist_ok=True)
     recorder = _Recorder(args.record, model) if args.record else None
     viewer_context = contextlib.nullcontext(None)
     if args.viewer and not args.no_viewer:
@@ -147,7 +156,6 @@ def main():
     if recorder is not None:
         recorder.close()
     if args.log:
-        Path(args.log).parent.mkdir(parents=True, exist_ok=True)
         with open(args.log, "w", encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(record) + "\n")
@@ -171,20 +179,30 @@ def main():
 
 class _Recorder:
     def __init__(self, path, model):
-        try:
-            import imageio.v2 as imageio
-        except ImportError as exc:
-            raise RuntimeError("--record requires imageio") from exc
-        self.writer = imageio.get_writer(path, fps=50)
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise RuntimeError("--record requires ffmpeg in PATH")
+        self.path = path
+        self.process = subprocess.Popen([
+            ffmpeg, "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-pix_fmt", "rgb24", "-s", "640x480", "-r", "50", "-i", "-",
+            "-an", "-vcodec", "libx264", "-pix_fmt", "yuv420p", path,
+        ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.renderer = __import__("mujoco").Renderer(model, height=480, width=640)
 
     def write(self, model, data):
-        self.renderer.update_scene(data, camera="track")
-        self.writer.append_data(self.renderer.render())
+        # The checked-in scenes intentionally have no named camera; -1 uses
+        # MuJoCo's free camera and works for both original and custom XMLs.
+        self.renderer.update_scene(data, camera=-1)
+        self.process.stdin.write(self.renderer.render().tobytes())
 
     def close(self):
         self.renderer.close()
-        self.writer.close()
+        self.process.stdin.close()
+        stderr = self.process.stderr.read().decode("utf-8", errors="replace")
+        return_code = self.process.wait()
+        if return_code:
+            raise RuntimeError(f"ffmpeg failed while writing {self.path}: {stderr[-500:]}")
 
 
 if __name__ == "__main__":
