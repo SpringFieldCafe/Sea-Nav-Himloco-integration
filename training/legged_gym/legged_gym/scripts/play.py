@@ -114,14 +114,16 @@ def play(args):
     # ---------------------------
     # Camera Setup for Recording
     # ---------------------------
-    camera_props = gymapi.CameraProperties()
-    camera_props.width = 1000
-    camera_props.height = 1000
-    camera_handle = env.gym.create_camera_sensor(env.envs[0], camera_props)
-    
-    # Set camera position (adjust as needed)
-    # View from top-down or isometric
-    env.gym.set_camera_location(camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0), gymapi.Vec3(4.99, 5.0, 0.0))
+    camera_handle = None
+    if args.viewer:
+        camera_props = gymapi.CameraProperties()
+        camera_props.width = 1000
+        camera_props.height = 1000
+        camera_handle = env.gym.create_camera_sensor(env.envs[0], camera_props)
+        env.gym.set_camera_location(
+            camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0),
+            gymapi.Vec3(4.99, 5.0, 0.0)
+        )
 
     RECORD_VIDEO = False
     SAVE_IMAGES = False
@@ -143,7 +145,6 @@ def play(args):
 
     obs, _ = env.reset()
     episode_count = 0
-    wall_step_start = time.perf_counter()
 
     try:
         with torch.inference_mode():
