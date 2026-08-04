@@ -35,6 +35,9 @@ def test_supervisor_limits_stairs_and_stops_on_fall():
     command, state = supervisor.update(_state("stairs_up"), np.array([1., 1., 2.]))
     assert state == TerrainState.STAIRS_UP
     assert np.all(np.abs(command) <= np.array([.28, .12, .35]))
+    command, state = supervisor.update(_state("stairs_up"), np.array([-1., 0., 0.]))
+    assert state == TerrainState.STAIRS_UP
+    assert command[0] > 0.0
     fallen = _state("flat")
     fallen.fallen = True
     command, state = supervisor.update(fallen, np.ones(3))

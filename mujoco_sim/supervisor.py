@@ -47,6 +47,12 @@ class TerrainSupervisor:
             TerrainState.EMERGENCY_STOP: (0.0, 0.0, 0.0),
         }[self.state]
         command = np.clip(np.asarray(raw_command, dtype=np.float32), -np.asarray(limits), limits)
+        if self.state == TerrainState.STAIRS_UP:
+            # Stair risers can look like close obstacles to a flat-ground policy.
+            # Keep a small forward bias so the robot climbs instead of reversing.
+            command[0] = max(command[0], 0.12)
+        elif self.state == TerrainState.STAIRS_DOWN:
+            command[0] = max(command[0], 0.10)
         command = .25 * command + .75 * self.last_command
         self.last_command = command
         return command, self.state
