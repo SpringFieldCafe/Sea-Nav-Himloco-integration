@@ -94,6 +94,48 @@ measured control frequency.
 
 ## Common problems
 
+### Rough random obstacle course
+
+`rough_random_obstacles` is a separate reproducible validation scene. It uses
+the existing rough height field, five simple box obstacles, one final waypoint,
+and randomizes the robot spawn Y coordinate and yaw. The obstacle positions and
+spawn are deterministic for a given `--seed`; this is similar in structure to
+the paper's randomized flat navigation evaluation, but remains a MuJoCo
+compatibility test rather than the original Isaac Gym training environment.
+
+Headless smoke test:
+
+```bash
+cd /home/hyz/桌面/sea_nav
+conda activate himloco
+python -m mujoco_sim.run \
+  --scene rough_random_obstacles \
+  --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt \
+  --himloco-policy models/locomotion/himloco/policy_1.pt \
+  --goal-x 12 --goal-y 0 --goal-radius 0.6 \
+  --stop-on-goal --ray-mode grid2ray \
+  --speed-scale 1.0 --command-filter-alpha 0.5 \
+  --steps 5000 --seed 7 --no-viewer \
+  --log logs/rough_random_seed7.jsonl
+```
+
+Viewer run with the waypoint marker:
+
+```bash
+python -m mujoco_sim.run \
+  --scene rough_random_obstacles \
+  --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt \
+  --himloco-policy models/locomotion/himloco/policy_1.pt \
+  --goal-x 12 --goal-y 0 --goal-radius 0.6 \
+  --stop-on-goal --ray-mode grid2ray \
+  --steps 30000 --seed 7 --viewer --draw-goal \
+  --log logs/rough_random_seed7_viewer.jsonl
+```
+
+The final JSON summary records `spawn_xy`, `spawn_yaw`, and
+`random_obstacles`. Reusing the same seed reproduces the same course; changing
+`--seed` generates a new simple layout.
+
 - **MuJoCo import error:** install the environment's pinned `mujoco` package;
   the simulator does not silently fall back to another physics engine.
 - **Missing policy:** pass a repository-relative or absolute path explicitly;

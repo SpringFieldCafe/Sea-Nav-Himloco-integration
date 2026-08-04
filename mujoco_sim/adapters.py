@@ -103,7 +103,7 @@ class MuJoCoStateAdapter(StateAdapter):
 
     def _obstacle_collision(self):
         robot_ids = {i for i in range(self.model.ngeom) if self.model.geom(i).bodyid != 0}
-        terrain_prefixes = ("floor", "step", "stair", "rough_field", "hfield")
+        terrain_prefixes = ("floor", "step", "stair", "rough_field", "rough_", "hfield")
         for contact in self.data.contact[:self.data.ncon]:
             first, second = contact.geom1, contact.geom2
             if first in robot_ids and second not in robot_ids:

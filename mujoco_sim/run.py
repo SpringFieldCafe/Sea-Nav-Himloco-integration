@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -29,10 +30,13 @@ SCENES = {
     "rough": ASSETS / "hfield.xml",
     "flat_obstacle": ASSETS / "course_flat_obstacle.xml",
     "mixed_course": ASSETS / "course_mixed.xml",
+    "rough_random_obstacles": ASSETS / "rough_random_obstacles.xml",
 }
 
 
 def _terrain(scene):
+    if scene == "rough_random_obstacles":
+        return "rough"
     if scene != "mixed_course":
         return {"stairs_up": "stairs_up", "stairs_down": "stairs_down",
                 "rough": "rough"}.get(scene, "flat")
@@ -45,6 +49,33 @@ def _terrain(scene):
             return "stairs_down"
         return "flat"
     return mixed_hint
+
+
+def _configure_rough_random_scene(model, data, seed):
+    """Create a reproducible rough-ground obstacle course for one episode."""
+    rng = np.random.default_rng(seed)
+    box_ids = [model.geom(f"random_box_{i}").id for i in range(5)]
+    centers = []
+    for _ in box_ids:
+        for _attempt in range(100):
+            candidate = np.array([rng.uniform(2.0, 10.5), rng.uniform(-1.0, 1.0)])
+            if all(np.linalg.norm(candidate - previous) >= 1.05 for previous in centers):
+                centers.append(candidate)
+                break
+        else:
+            raise RuntimeError("could not place random obstacles")
+    for geom_id, center in zip(box_ids, centers):
+        half = rng.uniform(0.25, 0.35)
+        model.geom_pos[geom_id] = [center[0], center[1], half]
+        model.geom_size[geom_id] = [half, half, half]
+
+    spawn_y = float(rng.uniform(-0.45, 0.45))
+    yaw = float(rng.uniform(-math.pi, math.pi))
+    data.qpos[0:3] = [0.8, spawn_y, 0.52]
+    data.qpos[3:7] = [math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)]
+    __import__("mujoco").mj_forward(model, data)
+    return {"spawn_xy": [0.8, spawn_y], "spawn_yaw": yaw,
+            "random_obstacles": [center.tolist() for center in centers]}
 
 
 def _reset(model, data):
@@ -126,6 +157,9 @@ def main():
     model = mujoco.MjModel.from_xml_path(str(SCENES[args.scene]))
     data = mujoco.MjData(model)
     _reset(model, data)
+    scene_metadata = {}
+    if args.scene == "rough_random_obstacles":
+        scene_metadata = _configure_rough_random_scene(model, data, args.seed)
     waypoint_path = args.waypoints
     if not waypoint_path and args.scene == "mixed_course":
         default_waypoints = Path("configs/mixed_course_waypoints.json")
@@ -242,6 +276,7 @@ def main():
                "waypoints_reached": len(waypoints.reached_indices),
                "current_waypoint_index": waypoints.current_index,
                "stop_on_goal": args.stop_on_goal}
+    summary.update(scene_metadata)
     print(json.dumps(summary, sort_keys=True))
 
 
