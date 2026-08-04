@@ -16,16 +16,34 @@
     <light pos="4 -4 8" dir="-0.2 0.2 -1" directional="true" diffuse="0.8 0.8 0.8" specular="0.4 0.4 0.4"/>
     <geom name="floor" type="plane" size="30 5 .05" material="floor"/>
     <geom name="box_a" type="box" pos="1.6 0.6 .25" size=".35 .35 .25"/>
-    <geom name="box_b" type="box" pos="1.8 -0.9 .3" size=".3 .3 .3"/>
-    <geom name="stair_up_1" type="box" pos="5 .0 .075" size=".15 1.0 .075"/>
-    <geom name="stair_up_2" type="box" pos="5.3 .0 .15" size=".15 1.0 .15"/>
-    <geom name="stair_up_3" type="box" pos="5.6 .0 .225" size=".15 1.0 .225"/>
-    <geom name="rough_field" type="hfield" hfield="rough" pos="8 0 0"/>
+    <geom name="box_b" type="box" pos="1.7 -1.0 .3" size=".4 .4 .3"/>
+    <!-- Tile the original rough patch across the whole course. Each tile is 4 m x 3 m. -->
+    <geom name="rough_field_00" type="hfield" hfield="rough" pos="0 -1.5 0"/>
+    <geom name="rough_field_01" type="hfield" hfield="rough" pos="0 1.5 0"/>
+    <geom name="rough_field_02" type="hfield" hfield="rough" pos="0 -4.5 0"/>
+    <geom name="rough_field_03" type="hfield" hfield="rough" pos="0 4.5 0"/>
+    <geom name="rough_field_10" type="hfield" hfield="rough" pos="4 -1.5 0"/>
+    <geom name="rough_field_11" type="hfield" hfield="rough" pos="4 1.5 0"/>
+    <geom name="rough_field_12" type="hfield" hfield="rough" pos="4 -4.5 0"/>
+    <geom name="rough_field_13" type="hfield" hfield="rough" pos="4 4.5 0"/>
+    <geom name="rough_field_20" type="hfield" hfield="rough" pos="8 -1.5 0"/>
+    <geom name="rough_field_21" type="hfield" hfield="rough" pos="8 1.5 0"/>
+    <geom name="rough_field_22" type="hfield" hfield="rough" pos="8 -4.5 0"/>
+    <geom name="rough_field_23" type="hfield" hfield="rough" pos="8 4.5 0"/>
+    <geom name="rough_field_30" type="hfield" hfield="rough" pos="12 -1.5 0"/>
+    <geom name="rough_field_31" type="hfield" hfield="rough" pos="12 1.5 0"/>
+    <geom name="rough_field_32" type="hfield" hfield="rough" pos="12 -4.5 0"/>
+    <geom name="rough_field_33" type="hfield" hfield="rough" pos="12 4.5 0"/>
+    <geom name="rough_field_40" type="hfield" hfield="rough" pos="16 -1.5 0"/>
+    <geom name="rough_field_41" type="hfield" hfield="rough" pos="16 1.5 0"/>
+    <geom name="rough_field_42" type="hfield" hfield="rough" pos="16 -4.5 0"/>
+    <geom name="rough_field_43" type="hfield" hfield="rough" pos="16 4.5 0"/>
+    <geom name="rough_field_50" type="hfield" hfield="rough" pos="20 -1.5 0"/>
+    <geom name="rough_field_51" type="hfield" hfield="rough" pos="20 1.5 0"/>
+    <geom name="rough_field_52" type="hfield" hfield="rough" pos="20 -4.5 0"/>
+    <geom name="rough_field_53" type="hfield" hfield="rough" pos="20 4.5 0"/>
     <geom name="rough_block" type="box" pos="8 .7 .35" size=".3 .3 .35"/>
     <geom name="narrow_left" type="box" pos="10 1.2 .5" size="2 .08 .5"/>
     <geom name="narrow_right" type="box" pos="10 -1.2 .5" size="2 .08 .5"/>
-    <geom name="stair_down_1" type="box" pos="12 .0 .225" size=".15 1.0 .225"/>
-    <geom name="stair_down_2" type="box" pos="12.3 .0 .15" size=".15 1.0 .15"/>
-    <geom name="stair_down_3" type="box" pos="12.6 .0 .075" size=".15 1.0 .075"/>
   </worldbody>
 </mujoco>
