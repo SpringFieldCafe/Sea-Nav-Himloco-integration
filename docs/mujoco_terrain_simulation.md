@@ -6,6 +6,11 @@ implementation. The checked-in simulator assets are a local copy of those
 scene files and meshes; policies remain separate files and are never retrained
 or re-exported by the simulator.
 
+Navigation commands below use `sea_nav_policy_peer_model_2000.pt`, exported
+from `models/navigation/model_2000.pt`, the peer-trained PPO checkpoint used
+by the successful Isaac Gym run. The older `sea_nav_policy_2000.pt` artifact is
+kept for comparison and is not the recommended policy for this branch.
+
 ## HIMLoco contract
 
 - input: `(N, 270)` = six newest-to-oldest frames of 45 values;
@@ -41,15 +46,15 @@ defaults to `grid2ray`, which is the Isaac-compatible terrain-truth mode; use
 `physical_lidar` for the MuJoCo geometry-ray comparison.
 
 ```bash
-python -m mujoco_sim.run --scene flat_obstacle --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --goal-x 12 --goal-y 0 --no-viewer
-python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --goal-x 17 --goal-y 0 --viewer --record logs/mixed_course.mp4
+python -m mujoco_sim.run --scene flat_obstacle --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --goal-x 12 --goal-y 0 --no-viewer
+python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --goal-x 17 --goal-y 0 --viewer --record logs/mixed_course.mp4
 ```
 
 For ordered waypoint evaluation:
 
 ```bash
-python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode grid2ray --goal-radius 0.6 --stop-on-goal --viewer --log logs/mixed_course_grid2ray.jsonl --record logs/mixed_course_grid2ray.mp4
-python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode physical_lidar --goal-radius 0.6 --stop-on-goal --no-viewer --log logs/mixed_course_lidar.jsonl
+python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode grid2ray --goal-radius 0.6 --stop-on-goal --viewer --log logs/mixed_course_grid2ray.jsonl --record logs/mixed_course_grid2ray.mp4
+python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode physical_lidar --goal-radius 0.6 --stop-on-goal --no-viewer --log logs/mixed_course_lidar.jsonl
 ```
 
 SEA-Nav uses the existing 55-value frame and 10-frame history, including 41
