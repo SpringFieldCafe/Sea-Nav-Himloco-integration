@@ -40,7 +40,7 @@ Then run SEA-Nav plus HIMLoco in one hard-room environment:
 ```bash
 python training/legged_gym/legged_gym/scripts/play.py \
   --task go2_pos_rough \
-  --navigation_checkpoint artifacts/go2_onboard/sea_nav_policy_2000.pt \
+  --navigation_checkpoint /home/hyz/桌面/sea_nav/models/navigation/model_2000.pt \
   --locomotion_backend himloco \
   --himloco_policy models/locomotion/himloco/policy_1.pt \
   --num_envs 1 \
@@ -60,7 +60,7 @@ the actual local checkpoint path when the checkpoint is stored elsewhere.
 ```bash
 python training/legged_gym/legged_gym/scripts/play.py \
   --task go2_pos_rough \
-  --navigation_checkpoint artifacts/go2_onboard/sea_nav_policy_2000.pt \
+  --navigation_checkpoint /home/hyz/桌面/sea_nav/models/navigation/model_2000.pt \
   --locomotion_backend himloco \
   --himloco_policy models/locomotion/himloco/policy_1.pt \
   --num_envs 64 \
