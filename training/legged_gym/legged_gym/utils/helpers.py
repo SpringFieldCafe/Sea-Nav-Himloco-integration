@@ -174,7 +174,7 @@ def get_args():
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
-        {"name": "--navigation_checkpoint", "type": str, "default": None, "help": "Direct path to a SEA-Nav navigation PPO checkpoint."},
+        {"name": "--navigation_checkpoint", "type": str, "default": None, "help": "Path to a SEA-Nav PPO checkpoint or TorchScript actor."},
         {"name": "--navigation_speed_scale", "type": float, "default": 1.0, "help": "Scale the navigation policy forward vx command during play."},
         {"name": "--eval_log", "type": str, "default": None, "help": "Write Isaac Gym navigation step and episode JSONL metrics."},
         {"name": "--eval_episodes", "type": int, "default": 10, "help": "Stop play after this many completed episodes."},
