@@ -33,9 +33,23 @@ python -m mujoco_sim.run --scene rough --himloco-policy models/locomotion/himloc
 
 ## SEA-Nav and mixed course
 
+The mixed course uses the ordered waypoint file
+`configs/mixed_course_waypoints.json` by default. Waypoints are visualized in
+the passive viewer, become the existing `relative_goal_xy` field, and stop the
+episode at the final point when `--stop-on-goal` is supplied. The ray mode
+defaults to `grid2ray`, which is the Isaac-compatible terrain-truth mode; use
+`physical_lidar` for the MuJoCo geometry-ray comparison.
+
 ```bash
 python -m mujoco_sim.run --scene flat_obstacle --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --goal-x 12 --goal-y 0 --no-viewer
 python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --goal-x 17 --goal-y 0 --viewer --record logs/mixed_course.mp4
+```
+
+For ordered waypoint evaluation:
+
+```bash
+python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode grid2ray --goal-radius 0.6 --stop-on-goal --viewer --log logs/mixed_course_grid2ray.jsonl --record logs/mixed_course_grid2ray.mp4
+python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode physical_lidar --goal-radius 0.6 --stop-on-goal --no-viewer --log logs/mixed_course_lidar.jsonl
 ```
 
 SEA-Nav uses the existing 55-value frame and 10-frame history, including 41
@@ -45,7 +59,9 @@ The terrain supervisor applies stricter limits on stairs and rough terrain.
 ## Evaluation output
 
 Each run prints a JSON summary and writes one JSONL record per control cycle
-when `--log` is supplied. The records include goal/fall/collision status,
+when `--log` is supplied. The records include waypoint index and target,
+relative goal, goal distance, ray mode, waypoint/goal completion, and
+goal/fall/collision status,
 terrain completion, elapsed time, path length, minimum obstacle distance,
 maximum roll/pitch, raw and supervised SEA-Nav commands, HIMLoco actions, and
 measured control frequency.
