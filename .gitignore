@@ -151,6 +151,8 @@ cython_debug/
 
 # Project specific
 logs/
+MUJOCO_LOG.TXT
+*.mp4
 wandb/
 
 # Policies, checkpoints, and experiment artifacts
