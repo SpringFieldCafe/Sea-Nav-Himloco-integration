@@ -131,14 +131,18 @@ def main():
             nav = load_navigation_policy(args.navigation_policy, "", torch.device(args.device))
             him = load_himloco_policy(args.himloco_policy, torch.device(args.device))
             core = PolicyRuntimeCore(nav, him, args.device)
+            control_steps = max(1, int(round(0.02 / model.opt.timestep)))
+            output = None
+            target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5])
             for step in range(args.steps):
-                state = adapter.read([args.goal_x, args.goal_y])
-                output = core.step(state)
+                if step % control_steps == 0:
+                    state = adapter.read([args.goal_x, args.goal_y])
+                    output = core.step(state)
+                    target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]) + output.himloco_action * .25
                 q, dq = data.qpos[7:19], data.qvel[6:18]
-                target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]) + output.himloco_action * .25
                 data.ctrl[:] = 20 * (target - q) - .5 * dq
                 mujoco.mj_step(model, data)
-                if step % 10 == 0:
+                if output is not None and step % control_steps == 0:
                     records.append({"step": step, "raw_command": output.raw_command.tolist(),
                                     "supervised_command": output.supervised_command.tolist(),
                                     "himloco_action": output.himloco_action.tolist(),
@@ -149,7 +153,7 @@ def main():
                                     "collision": state.collision, "fallen": state.fallen})
                 if viewer is not None:
                     viewer.sync()
-                if recorder is not None and step % 10 == 0:
+                if recorder is not None and step % control_steps == 0:
                     recorder.write(model, data)
         else:
             records = _run_himloco(model, data, args, adapter, viewer, recorder)
