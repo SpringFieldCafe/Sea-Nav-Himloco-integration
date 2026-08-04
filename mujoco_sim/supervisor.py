@@ -56,7 +56,8 @@ class TerrainSupervisor:
         }[self.state]
         limits = np.minimum(np.asarray(base_limits, dtype=np.float32) * self.speed_scale,
                             self.HARD_LIMITS)
-        command = np.clip(np.asarray(raw_command, dtype=np.float32), -limits, limits)
+        scaled_command = np.asarray(raw_command, dtype=np.float32) * self.speed_scale
+        command = np.clip(scaled_command, -limits, limits)
         command = (self.command_filter_alpha * command
                    + (1.0 - self.command_filter_alpha) * self.last_command)
         self.last_command = command

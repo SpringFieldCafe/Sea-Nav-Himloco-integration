@@ -40,3 +40,12 @@ def test_supervisor_limits_stairs_and_stops_on_fall():
     command, state = supervisor.update(fallen, np.ones(3))
     assert state == TerrainState.EMERGENCY_STOP
     assert np.all(command == 0)
+
+
+def test_speed_scale_applies_to_flat_without_breaking_hard_bounds():
+    supervisor = TerrainSupervisor(speed_scale=1.2, command_filter_alpha=1.0)
+    command, state = supervisor.update(_state("flat"), np.array([.5, .2, .5]))
+    assert state == TerrainState.NAVIGATE
+    torch.testing.assert_close(torch.from_numpy(command), torch.tensor([.6, .24, .6]))
+    command, _ = supervisor.update(_state("flat"), np.array([2., 2., 3.]))
+    assert np.all(np.abs(command) <= np.array([1., 1., 2.]) + 1e-6)

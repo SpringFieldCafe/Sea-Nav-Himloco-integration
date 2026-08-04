@@ -70,8 +70,11 @@ python -m mujoco_sim.run ... --speed-scale 1.15 --command-filter-alpha 0.65
 python -m mujoco_sim.run ... --speed-scale 0.75 --command-filter-alpha 0.35
 ```
 
-`--speed-scale` changes terrain supervisor command limits only. It does not
-change policy weights, PD gains, action scale, timestep, or observation order.
+`--speed-scale` scales both the raw SEA-Nav command and terrain supervisor
+limits, then applies the hard HIMLoco bounds `[-1,1] / [-1,1] / [-2,2]`. This
+also increases flat-ground commands when the policy output is below its hard
+limit; it does not change policy weights, PD gains, action scale, timestep, or
+observation order.
 `--command-filter-alpha` is the weight of the new command; larger values are
 more responsive and smaller values are smoother.
 
