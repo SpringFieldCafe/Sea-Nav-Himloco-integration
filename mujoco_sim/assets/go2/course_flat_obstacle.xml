@@ -1,0 +1,14 @@
+<mujoco model="sea-nav flat obstacle">
+  <include file="go2.xml"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <statistic center="6 0 0" extent="8"/>
+  <asset><texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0.1 0.1 0.1" width="512" height="3072"/><material name="floor" rgba="0.25 0.35 0.28 1"/></asset>
+  <worldbody>
+    <geom name="floor" type="plane" size="30 5 .05" material="floor"/>
+    <geom name="box_a" type="box" pos="2 0.8 .25" size=".35 .35 .25"/>
+    <geom name="box_b" type="box" pos="4 -0.7 .3" size=".3 .3 .3"/>
+    <geom name="pillar" type="cylinder" pos="6 0.8 .4" size=".35 .4"/>
+    <geom name="wall_left" type="box" pos="8 1.8 .5" size="2 .08 .5"/>
+    <geom name="wall_right" type="box" pos="8 -1.8 .5" size="2 .08 .5"/>
+  </worldbody>
+</mujoco>

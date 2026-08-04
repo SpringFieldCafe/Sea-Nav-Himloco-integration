@@ -1,0 +1,10 @@
+<mujoco model="go2 stairs down">
+  <include file="go2.xml"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="30 3 .05" rgba=".25 .35 .28 1"/>
+    <geom name="step_1" type="box" pos=".5 0 .225" size=".15 1 .225"/>
+    <geom name="step_2" type="box" pos=".8 0 .15" size=".15 1 .15"/>
+    <geom name="step_3" type="box" pos="1.1 0 .075" size=".15 1 .075"/>
+  </worldbody>
+</mujoco>
