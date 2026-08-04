@@ -72,8 +72,10 @@ def _run_himloco(model, data, args, adapter, viewer=None, recorder=None):
             inp = obs.build(torch_state["command"], torch_state["angular"], torch_state["gravity"], torch_state["q"], torch_state["dq"])
             action = infer(policy, inp, 12)[0].cpu().numpy()
             obs.record_action(torch.from_numpy(action).reshape(1, -1))
-            if args.log:
-                records.append({"step": step, "himloco_action": action.tolist(), "terrain": state.terrain_hint})
+            records.append({"step": step, "himloco_action": action.tolist(), "terrain": state.terrain_hint,
+                            "position_xy": state.position_xy.tolist(), "roll": state.roll,
+                            "pitch": state.pitch, "min_obstacle_distance": state.min_obstacle_distance,
+                            "collision": state.collision, "fallen": state.fallen})
         if viewer is not None:
             viewer.sync()
         if recorder is not None and step % control_steps == 0:
@@ -124,12 +126,15 @@ def main():
                 target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]) + output.himloco_action * .25
                 data.ctrl[:] = 20 * (target - q) - .5 * dq
                 mujoco.mj_step(model, data)
-                if args.log and step % 10 == 0:
+                if step % 10 == 0:
                     records.append({"step": step, "raw_command": output.raw_command.tolist(),
                                     "supervised_command": output.supervised_command.tolist(),
                                     "himloco_action": output.himloco_action.tolist(),
                                     "supervisor_state": output.supervisor_state,
-                                    "control_hz": output.control_hz})
+                                    "control_hz": output.control_hz,
+                                    "position_xy": state.position_xy.tolist(), "roll": state.roll,
+                                    "pitch": state.pitch, "min_obstacle_distance": state.min_obstacle_distance,
+                                    "collision": state.collision, "fallen": state.fallen})
                 if viewer is not None:
                     viewer.sync()
                 if recorder is not None and step % 10 == 0:
@@ -145,11 +150,19 @@ def main():
                 handle.write(json.dumps(record) + "\n")
     elapsed = time.perf_counter() - started
     state = adapter.read([args.goal_x, args.goal_y])
+    positions = np.asarray([r["position_xy"] for r in records if "position_xy" in r], dtype=np.float32)
+    path_length = float(np.linalg.norm(np.diff(positions, axis=0), axis=1).sum()) if len(positions) > 1 else 0.0
+    max_roll = max((abs(float(r["roll"])) for r in records if "roll" in r), default=abs(state.roll))
+    max_pitch = max((abs(float(r["pitch"])) for r in records if "pitch" in r), default=abs(state.pitch))
+    min_distance = min((float(r["min_obstacle_distance"]) for r in records if "min_obstacle_distance" in r), default=state.min_obstacle_distance)
+    collision = any(r.get("collision", False) for r in records) or state.collision
+    fallen = any(r.get("fallen", False) for r in records) or state.fallen
     summary = {"scene": args.scene, "seed": args.seed, "steps": args.steps,
                "elapsed_s": elapsed, "goal_reached": float(np.linalg.norm(state.goal_xy)) < .45,
-               "fallen": state.fallen, "collision": state.collision,
-               "terrain": state.terrain_hint, "max_roll": abs(state.roll),
-               "max_pitch": abs(state.pitch), "min_obstacle_distance": state.min_obstacle_distance}
+               "fallen": fallen, "collision": collision,
+               "terrain": state.terrain_hint, "path_length": path_length,
+               "max_roll": max_roll, "max_pitch": max_pitch,
+               "min_obstacle_distance": min_distance}
     print(json.dumps(summary, sort_keys=True))
 
 
