@@ -1,0 +1,73 @@
+<mujoco model="sea-nav winding rough course">
+  <include file="go2.xml"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <statistic center="10 0 0.5" extent="12"/>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.9 0.9 0.9"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0.1 0.1 0.1" width="512" height="3072"/>
+    <material name="floor" rgba="0.25 0.35 0.28 1"/>
+    <hfield name="rough" file="../height_field.png" size="2 1.5 .18 .12"/>
+  </asset>
+  <worldbody>
+    <light pos="4 -4 8" dir="-0.2 0.2 -1" directional="true" diffuse="0.8 0.8 0.8" specular="0.4 0.4 0.4"/>
+    <geom name="floor" type="plane" size="30 8 .05" material="floor"/>
+    <geom name="rough_field_00" type="hfield" hfield="rough" pos="0 -6 0"/>
+    <geom name="rough_field_01" type="hfield" hfield="rough" pos="0 -3 0"/>
+    <geom name="rough_field_02" type="hfield" hfield="rough" pos="0 0 0"/>
+    <geom name="rough_field_03" type="hfield" hfield="rough" pos="0 3 0"/>
+    <geom name="rough_field_04" type="hfield" hfield="rough" pos="0 6 0"/>
+    <geom name="rough_field_10" type="hfield" hfield="rough" pos="4 -6 0"/>
+    <geom name="rough_field_11" type="hfield" hfield="rough" pos="4 -3 0"/>
+    <geom name="rough_field_12" type="hfield" hfield="rough" pos="4 0 0"/>
+    <geom name="rough_field_13" type="hfield" hfield="rough" pos="4 3 0"/>
+    <geom name="rough_field_14" type="hfield" hfield="rough" pos="4 6 0"/>
+    <geom name="rough_field_20" type="hfield" hfield="rough" pos="8 -6 0"/>
+    <geom name="rough_field_21" type="hfield" hfield="rough" pos="8 -3 0"/>
+    <geom name="rough_field_22" type="hfield" hfield="rough" pos="8 0 0"/>
+    <geom name="rough_field_23" type="hfield" hfield="rough" pos="8 3 0"/>
+    <geom name="rough_field_24" type="hfield" hfield="rough" pos="8 6 0"/>
+    <geom name="rough_field_30" type="hfield" hfield="rough" pos="12 -6 0"/>
+    <geom name="rough_field_31" type="hfield" hfield="rough" pos="12 -3 0"/>
+    <geom name="rough_field_32" type="hfield" hfield="rough" pos="12 0 0"/>
+    <geom name="rough_field_33" type="hfield" hfield="rough" pos="12 3 0"/>
+    <geom name="rough_field_34" type="hfield" hfield="rough" pos="12 6 0"/>
+    <geom name="rough_field_40" type="hfield" hfield="rough" pos="16 -6 0"/>
+    <geom name="rough_field_41" type="hfield" hfield="rough" pos="16 -3 0"/>
+    <geom name="rough_field_42" type="hfield" hfield="rough" pos="16 0 0"/>
+    <geom name="rough_field_43" type="hfield" hfield="rough" pos="16 3 0"/>
+    <geom name="rough_field_44" type="hfield" hfield="rough" pos="16 6 0"/>
+    <geom name="rough_field_50" type="hfield" hfield="rough" pos="20 -6 0"/>
+    <geom name="rough_field_51" type="hfield" hfield="rough" pos="20 -3 0"/>
+    <geom name="rough_field_52" type="hfield" hfield="rough" pos="20 0 0"/>
+    <geom name="rough_field_53" type="hfield" hfield="rough" pos="20 3 0"/>
+    <geom name="rough_field_54" type="hfield" hfield="rough" pos="20 6 0"/>
+
+    <!-- Snake corridor: two side walls around the waypoint centerline. -->
+    <geom name="wall_h_00" type="box" pos="2 -0.8 .6" size="2 .12 .6"/>
+    <geom name="wall_h_01" type="box" pos="2 0.8 .6" size="2 .12 .6"/>
+    <geom name="wall_v_10" type="box" pos="3.2 1 .6" size=".12 1 .6"/>
+    <geom name="wall_v_11" type="box" pos="4.8 1 .6" size=".12 1 .6"/>
+    <geom name="wall_h_20" type="box" pos="6 1.2 .6" size="2 .12 .6"/>
+    <geom name="wall_h_21" type="box" pos="6 2.8 .6" size="2 .12 .6"/>
+    <geom name="wall_v_30" type="box" pos="7.2 0 .6" size=".12 2 .6"/>
+    <geom name="wall_v_31" type="box" pos="8.8 0 .6" size=".12 2 .6"/>
+    <geom name="wall_h_40" type="box" pos="10 -2.8 .6" size="2 .12 .6"/>
+    <geom name="wall_h_41" type="box" pos="10 -1.2 .6" size="2 .12 .6"/>
+    <geom name="wall_v_50" type="box" pos="11.2 0 .6" size=".12 2 .6"/>
+    <geom name="wall_v_51" type="box" pos="12.8 0 .6" size=".12 2 .6"/>
+    <geom name="wall_h_60" type="box" pos="14 1.2 .6" size="2 .12 .6"/>
+    <geom name="wall_h_61" type="box" pos="14 2.8 .6" size="2 .12 .6"/>
+    <geom name="wall_h_70" type="box" pos="18 1.2 .6" size="2 .12 .6"/>
+    <geom name="wall_h_71" type="box" pos="18 2.8 .6" size="2 .12 .6"/>
+
+    <!-- Interior obstacles; each straight has room to pass on either side. -->
+    <geom name="course_box_0" type="box" pos="2 0.25 .35" size=".3 .3 .35"/>
+    <geom name="course_box_1" type="box" pos="6 2.35 .35" size=".3 .3 .35"/>
+    <geom name="course_box_2" type="box" pos="10 -1.65 .35" size=".3 .3 .35"/>
+    <geom name="course_box_3" type="box" pos="14 2.35 .35" size=".3 .3 .35"/>
+  </worldbody>
+</mujoco>

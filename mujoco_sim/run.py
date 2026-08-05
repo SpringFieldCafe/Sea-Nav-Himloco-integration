@@ -29,11 +29,12 @@ SCENES = {
     "rough": ASSETS / "hfield.xml",
     "flat_obstacle": ASSETS / "course_flat_obstacle.xml",
     "mixed_course": ASSETS / "course_mixed.xml",
+    "winding_course": ASSETS / "course_winding.xml",
 }
 
 
 def _terrain(scene):
-    if scene != "mixed_course":
+    if scene not in ("mixed_course", "winding_course"):
         return {"stairs_up": "stairs_up", "stairs_down": "stairs_down",
                 "rough": "rough"}.get(scene, "flat")
     return lambda _x: "rough"
@@ -171,7 +172,7 @@ def main():
                  if waypoint_path else
                  WaypointManager.single(args.goal_x, args.goal_y, args.goal_radius))
     obstacle_layout = []
-    if args.scene == "mixed_course" and args.random_obstacles:
+    if args.scene in ("mixed_course", "winding_course") and args.random_obstacles:
         obstacle_layout = _configure_random_obstacles(
             model, data, args.seed, waypoints, args.random_obstacle_count)
     adapter = MuJoCoStateAdapter(model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode)

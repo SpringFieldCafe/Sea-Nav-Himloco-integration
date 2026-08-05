@@ -22,6 +22,13 @@ The mixed course intentionally does not use the old long `narrow_left` and
 `narrow_right` wall pair. Those 4 m walls create a corridor unlike the random
 box training distribution and can dominate the navigation behavior.
 
+The `winding_course` scene is a separate rough-ground course with rectangular
+side walls, centerline waypoints, and four interior boxes. Run it with:
+
+```bash
+python -m mujoco_sim.run --scene winding_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/winding_course_waypoints.json --ray-mode grid2ray --speed-scale 1.0 --command-filter-alpha 0.7 --viewer --draw-goal --log logs/winding_course.jsonl
+```
+
 ## HIMLoco contract
 
 - input: `(N, 270)` = six newest-to-oldest frames of 45 values;
