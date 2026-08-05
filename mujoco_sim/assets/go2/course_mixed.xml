@@ -55,5 +55,9 @@
     <geom name="random_box_3" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
     <geom name="random_box_4" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
     <geom name="random_box_5" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_6" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_7" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_8" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_9" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
   </worldbody>
 </mujoco>

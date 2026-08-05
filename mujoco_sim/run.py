@@ -48,13 +48,15 @@ def _reset(model, data):
     __import__("mujoco").mj_forward(model, data)
 
 
-def _configure_random_obstacles(model, data, seed, waypoints):
+def _configure_random_obstacles(model, data, seed, waypoints, count=10):
     """Place extra boxes reproducibly while preserving a center safe corridor."""
     rng = np.random.default_rng(seed)
-    names = [f"random_box_{i}" for i in range(6)]
+    max_count = 10
+    count = max(0, min(int(count), max_count))
+    names = [f"random_box_{i}" for i in range(count)]
     waypoint_xy = np.asarray([w.xy for w in waypoints.waypoints], dtype=np.float32)
     placed = []
-    candidates = np.arange(2.2, 16.8, 0.8, dtype=np.float32)
+    candidates = np.arange(2.2, 19.0, 0.8, dtype=np.float32)
     rng.shuffle(candidates)
     for x in candidates:
         if len(placed) == len(names):
@@ -141,6 +143,8 @@ def main():
                         help="disable clear-space lateral drift damping")
     parser.add_argument("--random-obstacles", action="store_true",
                         help="place additional seed-reproducible boxes in mixed_course")
+    parser.add_argument("--random-obstacle-count", type=int, default=10,
+                        help="number of extra boxes, 0-10, when random obstacles are enabled")
     args = parser.parse_args()
     np.random.seed(args.seed)
     if args.record and not args.viewer:
@@ -162,7 +166,8 @@ def main():
                  WaypointManager.single(args.goal_x, args.goal_y, args.goal_radius))
     obstacle_layout = []
     if args.scene == "mixed_course" and args.random_obstacles:
-        obstacle_layout = _configure_random_obstacles(model, data, args.seed, waypoints)
+        obstacle_layout = _configure_random_obstacles(
+            model, data, args.seed, waypoints, args.random_obstacle_count)
     adapter = MuJoCoStateAdapter(model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode)
     records = []
     started = time.perf_counter()

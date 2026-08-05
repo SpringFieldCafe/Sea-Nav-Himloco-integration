@@ -14,7 +14,7 @@ kept for comparison and is not the recommended policy for this branch.
 The mixed course uses a tiled rough field whose center row is `y=0`; the
 waypoints are placed at the tile centers `x=0,4,8,12,16,20` rather than on
 tile seams. Optional extra boxes can be generated at runtime with a seeded
-layout sampler. The same seed reproduces the same layout; changing `--seed`
+layout sampler. The default layout uses 10 moderate boxes. The same seed reproduces the same layout; changing `--seed`
 creates a different layout while preserving a clear center corridor around the
 waypoints.
 
@@ -68,7 +68,7 @@ python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_
 python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode physical_lidar --goal-radius 0.6 --stop-on-goal --no-viewer --log logs/mixed_course_lidar.jsonl
 
 # Seed-reproducible randomized obstacles in the rough course.
-python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode grid2ray --random-obstacles --seed 0 --speed-scale 1.5 --command-filter-alpha 0.7 --viewer --draw-goal --log logs/mixed_course_random_seed0.jsonl
+python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode grid2ray --random-obstacles --random-obstacle-count 10 --seed 0 --speed-scale 1.5 --command-filter-alpha 0.7 --viewer --draw-goal --log logs/mixed_course_random_seed0.jsonl
 ```
 
 SEA-Nav uses the existing 55-value frame and 10-frame history, including 41
