@@ -49,7 +49,8 @@
     <geom name="rough_field_52" type="hfield" hfield="rough" pos="20 0 0"/>
     <geom name="rough_field_53" type="hfield" hfield="rough" pos="20 3 0"/>
     <geom name="rough_field_54" type="hfield" hfield="rough" pos="20 6 0"/>
-    <geom name="rough_block" type="box" pos="8 .7 .35" size=".3 .3 .35"/>
+    <!-- Keep the fixed rough-area obstacle outside the waypoint corridor. -->
+    <geom name="rough_block" type="box" pos="8 2.0 .35" size=".3 .3 .35"/>
     <!-- Runtime-randomized boxes. They start outside the course and are
          placed by --random-obstacles using a seed-aware safe-layout sampler. -->
     <geom name="random_box_0" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
