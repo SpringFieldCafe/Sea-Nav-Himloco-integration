@@ -75,6 +75,9 @@ def _configure_random_obstacles(model, data, seed, waypoints, count=10):
         model.geom_pos[geom_id, :2] = [x, y]
         model.geom_size[geom_id, :2] = size_xy
         model.geom_size[geom_id, 2] = float(rng.uniform(0.25, 0.42))
+        # The XML placeholders are below the floor. Lift each randomized box
+        # above the rough-field height so it is visible and ray-detectable.
+        model.geom_pos[geom_id, 2] = model.geom_size[geom_id, 2] + 0.08
     __import__("mujoco").mj_forward(model, data)
     return [{"name": name, "x": float(pos[0]), "y": float(pos[1])}
             for name, pos in zip(names, placed)]
