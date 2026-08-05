@@ -137,6 +137,8 @@ def main():
                         help="scale terrain command limits, capped by HIMLoco bounds")
     parser.add_argument("--command-filter-alpha", type=float, default=0.5,
                         help="new-command weight in (0,1], larger is more responsive")
+    parser.add_argument("--no-open-space-assist", action="store_true",
+                        help="disable clear-space lateral drift damping")
     parser.add_argument("--random-obstacles", action="store_true",
                         help="place additional seed-reproducible boxes in mixed_course")
     args = parser.parse_args()
@@ -185,6 +187,7 @@ def main():
                 supervisor=TerrainSupervisor(
                     speed_scale=args.speed_scale,
                     command_filter_alpha=args.command_filter_alpha,
+                    open_space_assist=not args.no_open_space_assist,
                 ),
             )
             control_steps = max(1, int(round(0.02 / model.opt.timestep)))
