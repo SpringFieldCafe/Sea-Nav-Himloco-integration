@@ -98,11 +98,15 @@ class MuJoCoStateAdapter(StateAdapter):
         ground_origin = body_pos + np.array([0, 0, 2.0])
         ground_distance, _ = self._ray(ground_origin, [0, 0, -1])
         ground_z = ground_origin[2] - ground_distance if ground_distance >= 0 else 0.0
-        values = np.full(41, 5.0, dtype=np.float32)
+        # Isaac Gym go2_pos uses ray2d.max_dist=3.0 m. Keep this separate
+        # from the physical LiDAR's 5 m range so the policy sees its training
+        # distribution in grid2ray mode.
+        max_radius = 3.0
+        values = np.full(41, max_radius, dtype=np.float32)
         angles = np.linspace(-2 * math.pi / 3, 2 * math.pi / 3, 41)
         for i, angle in enumerate(angles):
             direction = rot @ np.array([math.cos(angle), math.sin(angle), 0.0])
-            for radius in np.arange(0.1, 5.01, 0.1):
+            for radius in np.arange(0.1, max_radius + 0.01, 0.1):
                 sample = body_pos + direction * radius + np.array([0, 0, 2.0])
                 distance, geom_id = self._ray(sample, [0, 0, -1])
                 if distance < 0:
@@ -136,8 +140,11 @@ class MuJoCoStateAdapter(StateAdapter):
         quat = self.data.xquat[body_id]
         gravity, roll, pitch = _gravity_and_rpy(quat)
         rot = np.asarray(self.data.xmat[body_id]).reshape(3, 3)
-        lin = rot.T @ self.data.cvel[body_id, 3:6]
-        ang = rot.T @ self.data.cvel[body_id, :3]
+        # MuJoCo cvel is already expressed in the body's local frame.
+        # Applying rot.T here a second time corrupts the velocity directions
+        # sent to both SEA-Nav and HIMLoco when the robot yaws.
+        lin = np.asarray(self.data.cvel[body_id, 3:6])
+        ang = np.asarray(self.data.cvel[body_id, :3])
         q = np.asarray([self.data.qpos[self.model.jnt_qposadr[j]] for j in self.joint_ids])
         dq = np.asarray([self.data.qvel[self.model.jnt_dofadr[j]] for j in self.joint_ids])
         position = self.data.xpos[body_id][:2].astype(np.float32)

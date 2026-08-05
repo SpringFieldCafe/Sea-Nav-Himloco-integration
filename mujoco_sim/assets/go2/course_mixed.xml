@@ -15,8 +15,6 @@
   <worldbody>
     <light pos="4 -4 8" dir="-0.2 0.2 -1" directional="true" diffuse="0.8 0.8 0.8" specular="0.4 0.4 0.4"/>
     <geom name="floor" type="plane" size="30 8 .05" material="floor"/>
-    <geom name="box_a" type="box" pos="2 .8 .25" size=".35 .35 .25"/>
-    <geom name="box_b" type="box" pos="3 -.8 .3" size=".3 .3 .3"/>
     <!-- 4 m x 3 m tiles. The center row is y=0, so the waypoint corridor
          runs through tile centers instead of along tile seams. -->
     <geom name="rough_field_00" type="hfield" hfield="rough" pos="0 -6 0"/>
