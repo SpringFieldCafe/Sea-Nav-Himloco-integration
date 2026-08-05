@@ -48,6 +48,36 @@ def _reset(model, data):
     __import__("mujoco").mj_forward(model, data)
 
 
+def _configure_random_obstacles(model, data, seed, waypoints):
+    """Place extra boxes reproducibly while preserving a center safe corridor."""
+    rng = np.random.default_rng(seed)
+    names = [f"random_box_{i}" for i in range(6)]
+    waypoint_xy = np.asarray([w.xy for w in waypoints.waypoints], dtype=np.float32)
+    placed = []
+    candidates = np.arange(2.2, 16.8, 0.8, dtype=np.float32)
+    rng.shuffle(candidates)
+    for x in candidates:
+        if len(placed) == len(names):
+            break
+        # Keep the waypoint corridor clear. Obstacles remain offset from the
+        # centerline so the policy can choose either side without a dead end.
+        y = float(rng.choice((-1.45, -1.20, 1.20, 1.45)))
+        size_xy = float(rng.uniform(0.22, 0.32))
+        if np.any(np.linalg.norm(waypoint_xy - np.array([x, y]), axis=1)
+                  < 0.8 + size_xy + 0.45):
+            continue
+        if any(np.linalg.norm(np.array([x, y]) - p) < 1.1 for p in placed):
+            continue
+        placed.append(np.array([x, y], dtype=np.float32))
+        geom_id = model.geom(names[len(placed) - 1]).id
+        model.geom_pos[geom_id, :2] = [x, y]
+        model.geom_size[geom_id, :2] = size_xy
+        model.geom_size[geom_id, 2] = float(rng.uniform(0.25, 0.42))
+    __import__("mujoco").mj_forward(model, data)
+    return [{"name": name, "x": float(pos[0]), "y": float(pos[1])}
+            for name, pos in zip(names, placed)]
+
+
 def _run_himloco(model, data, args, adapter, viewer=None, recorder=None):
     policy = load_himloco_policy(args.himloco_policy, torch.device(args.device))
     obs = HIMLocoObservation(torch.device(args.device))
@@ -107,6 +137,8 @@ def main():
                         help="scale terrain command limits, capped by HIMLoco bounds")
     parser.add_argument("--command-filter-alpha", type=float, default=0.5,
                         help="new-command weight in (0,1], larger is more responsive")
+    parser.add_argument("--random-obstacles", action="store_true",
+                        help="place additional seed-reproducible boxes in mixed_course")
     args = parser.parse_args()
     np.random.seed(args.seed)
     if args.record and not args.viewer:
@@ -126,6 +158,9 @@ def main():
     waypoints = (WaypointManager.from_json(waypoint_path, args.goal_radius)
                  if waypoint_path else
                  WaypointManager.single(args.goal_x, args.goal_y, args.goal_radius))
+    obstacle_layout = []
+    if args.scene == "mixed_course" and args.random_obstacles:
+        obstacle_layout = _configure_random_obstacles(model, data, args.seed, waypoints)
     adapter = MuJoCoStateAdapter(model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode)
     records = []
     started = time.perf_counter()
@@ -190,7 +225,8 @@ def main():
                                     "target_relative_xy": state.goal_xy.tolist(),
                                     "target_distance": waypoints.distance(state.position_xy),
                                     "waypoint_reached": waypoint_was_reached,
-                                    "goal_reached": waypoints.done})
+                                    "goal_reached": waypoints.done,
+                                    "random_obstacles": obstacle_layout})
                 if stopped and args.stop_on_goal:
                     break
                 if viewer is not None:
@@ -233,6 +269,7 @@ def main():
                "waypoints_total": waypoints.total,
                "waypoints_reached": len(waypoints.reached_indices),
                "current_waypoint_index": waypoints.current_index,
+               "random_obstacles": obstacle_layout,
                "stop_on_goal": args.stop_on_goal}
     print(json.dumps(summary, sort_keys=True))
 

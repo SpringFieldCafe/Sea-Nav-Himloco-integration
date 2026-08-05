@@ -44,5 +44,13 @@
     <geom name="rough_block" type="box" pos="8 .7 .35" size=".3 .3 .35"/>
     <geom name="narrow_left" type="box" pos="10 1.2 .5" size="2 .08 .5"/>
     <geom name="narrow_right" type="box" pos="10 -1.2 .5" size="2 .08 .5"/>
+    <!-- Runtime-randomized boxes. They start outside the course and are
+         placed by --random-obstacles using a seed-aware safe-layout sampler. -->
+    <geom name="random_box_0" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_1" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_2" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_3" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_4" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
+    <geom name="random_box_5" type="box" pos="0 8 -.3" size=".28 .28 .3"/>
   </worldbody>
 </mujoco>

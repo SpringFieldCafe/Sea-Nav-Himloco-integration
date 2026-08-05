@@ -11,6 +11,12 @@ from `models/navigation/model_2000.pt`, the peer-trained PPO checkpoint used
 by the successful Isaac Gym run. The older `sea_nav_policy_2000.pt` artifact is
 kept for comparison and is not the recommended policy for this branch.
 
+The mixed course waypoints are kept inside the rough-field tiles rather than
+on tile seams. Optional extra boxes can be generated at runtime with a seeded
+layout sampler. The same seed reproduces the same layout; changing `--seed`
+creates a different layout while preserving a clear center corridor around the
+waypoints.
+
 ## HIMLoco contract
 
 - input: `(N, 270)` = six newest-to-oldest frames of 45 values;
@@ -55,6 +61,9 @@ For ordered waypoint evaluation:
 ```bash
 python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode grid2ray --goal-radius 0.6 --stop-on-goal --viewer --log logs/mixed_course_grid2ray.jsonl --record logs/mixed_course_grid2ray.mp4
 python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode physical_lidar --goal-radius 0.6 --stop-on-goal --no-viewer --log logs/mixed_course_lidar.jsonl
+
+# Seed-reproducible randomized obstacles in the rough course.
+python -m mujoco_sim.run --scene mixed_course --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt --himloco-policy models/locomotion/himloco/policy_1.pt --waypoints configs/mixed_course_waypoints.json --ray-mode grid2ray --random-obstacles --seed 0 --speed-scale 1.5 --command-filter-alpha 0.7 --viewer --draw-goal --log logs/mixed_course_random_seed0.jsonl
 ```
 
 SEA-Nav uses the existing 55-value frame and 10-frame history, including 41
