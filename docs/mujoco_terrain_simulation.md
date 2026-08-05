@@ -18,6 +18,10 @@ layout sampler. The same seed reproduces the same layout; changing `--seed`
 creates a different layout while preserving a clear center corridor around the
 waypoints.
 
+The mixed course intentionally does not use the old long `narrow_left` and
+`narrow_right` wall pair. Those 4 m walls create a corridor unlike the random
+box training distribution and can dominate the navigation behavior.
+
 ## HIMLoco contract
 
 - input: `(N, 270)` = six newest-to-oldest frames of 45 values;
