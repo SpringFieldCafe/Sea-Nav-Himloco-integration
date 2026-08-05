@@ -56,19 +56,22 @@ def _configure_random_obstacles(model, data, seed, waypoints, count=10):
     names = [f"random_box_{i}" for i in range(count)]
     waypoint_xy = np.asarray([w.xy for w in waypoints.waypoints], dtype=np.float32)
     placed = []
-    candidates = np.arange(2.2, 19.0, 0.8, dtype=np.float32)
+    candidates = np.arange(2.2, 19.0, 0.4, dtype=np.float32)
     rng.shuffle(candidates)
     for x in candidates:
         if len(placed) == len(names):
             break
         # Keep the waypoint corridor clear. Obstacles remain offset from the
         # centerline so the policy can choose either side without a dead end.
-        y = float(rng.choice((-1.45, -1.20, 1.20, 1.45)))
+        y = float(rng.choice((-1.80, -1.60, 1.60, 1.80)))
         size_xy = float(rng.uniform(0.22, 0.32))
         if np.any(np.linalg.norm(waypoint_xy - np.array([x, y]), axis=1)
                   < 0.8 + size_xy + 0.45):
             continue
-        if any(np.linalg.norm(np.array([x, y]) - p) < 1.1 for p in placed):
+        # Keep one obstacle per longitudinal slice. Two boxes on opposite
+        # sides at nearly the same x create an unintended gate for the local
+        # policy even when their Euclidean centers do not overlap.
+        if any(abs(float(x) - float(p[0])) < 1.4 for p in placed):
             continue
         placed.append(np.array([x, y], dtype=np.float32))
         geom_id = model.geom(names[len(placed) - 1]).id
