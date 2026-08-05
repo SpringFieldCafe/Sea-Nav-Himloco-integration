@@ -11,8 +11,9 @@ from `models/navigation/model_2000.pt`, the peer-trained PPO checkpoint used
 by the successful Isaac Gym run. The older `sea_nav_policy_2000.pt` artifact is
 kept for comparison and is not the recommended policy for this branch.
 
-The mixed course waypoints are kept inside the rough-field tiles rather than
-on tile seams. Optional extra boxes can be generated at runtime with a seeded
+The mixed course uses a tiled rough field whose center row is `y=0`; the
+waypoints are placed at the tile centers `x=0,4,8,12,16,20` rather than on
+tile seams. Optional extra boxes can be generated at runtime with a seeded
 layout sampler. The same seed reproduces the same layout; changing `--seed`
 creates a different layout while preserving a clear center corridor around the
 waypoints.
