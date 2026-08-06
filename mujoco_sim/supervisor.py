@@ -47,10 +47,19 @@ class TerrainSupervisor:
             self.state = TerrainState.APPROACH_STAIRS
         elif self._is_turning(state):
             self.state = TerrainState.TURNING
+        elif self.state == TerrainState.TURNING and self._is_turning(state, threshold=0.15):
+            # Do not immediately restore full forward speed when a waypoint
+            # changes near a bend.  The lower threshold provides hysteresis.
+            self.state = TerrainState.TURNING
         elif terrain == "rough":
             self.state = TerrainState.ROUGH_TERRAIN
         else:
             self.state = TerrainState.NAVIGATE
+
+        if self.state == TerrainState.EMERGENCY_STOP:
+            # An emergency stop must not be blended with the previous command.
+            self.last_command[:] = 0.0
+            return np.zeros(3, dtype=np.float32), self.state
 
         base_limits = {
             TerrainState.NAVIGATE: (1.0, 1.0, 2.0),
@@ -106,9 +115,10 @@ class TerrainSupervisor:
         adjusted[2] *= 1.0 - 0.35 * center_weight
         return adjusted
 
-    def _is_turning(self, state):
+    def _is_turning(self, state, threshold=None):
         """Detect a meaningful body-frame goal bearing without changing policy output."""
         goal_x, goal_y = np.asarray(state.goal_xy, dtype=np.float32)
         if goal_x <= 0.0:
             return False
-        return abs(float(np.arctan2(goal_y, max(goal_x, 1e-3)))) > self.TURN_BEARING_THRESHOLD
+        threshold = self.TURN_BEARING_THRESHOLD if threshold is None else threshold
+        return abs(float(np.arctan2(goal_y, max(goal_x, 1e-3)))) > threshold

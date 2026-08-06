@@ -53,3 +53,15 @@ def test_supervisor_enters_turning_state_and_limits_command_change():
     assert mode == TerrainState.TURNING
     assert np.all(np.abs(command) <= supervisor.TURN_COMMAND_LIMITS)
     assert np.all(np.abs(command) <= supervisor.TURN_COMMAND_DELTA)
+
+
+def test_supervisor_keeps_turning_state_through_waypoint_change():
+    supervisor = TerrainSupervisor(command_filter_alpha=1.0)
+    state = _state("flat")
+    state.goal_xy = np.array([1.0, 1.0], dtype=np.float32)
+    _, mode = supervisor.update(state, np.ones(3))
+    assert mode == TerrainState.TURNING
+    state.goal_xy = np.array([1.0, 0.32], dtype=np.float32)
+    command, mode = supervisor.update(state, np.ones(3))
+    assert mode == TerrainState.TURNING
+    assert command[0] <= supervisor.TURN_COMMAND_LIMITS[0]
