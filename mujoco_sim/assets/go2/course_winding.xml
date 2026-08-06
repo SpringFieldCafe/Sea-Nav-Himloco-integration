@@ -10,46 +10,17 @@
   <asset>
     <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0.1 0.1 0.1" width="512" height="3072"/>
     <material name="floor" rgba="0.25 0.35 0.28 1"/>
-    <hfield name="rough" file="../height_field.png" size="2 1.5 .18 .12"/>
+    <hfield name="rough_large" file="../height_field_large.png" size="12 7.5 .18 .12"/>
   </asset>
   <worldbody>
     <light pos="4 -4 8" dir="-0.2 0.2 -1" directional="true" diffuse="0.8 0.8 0.8" specular="0.4 0.4 0.4"/>
     <site name="winding_spawn" pos="0 -2 .45" size=".08" rgba="0.1 1 0.1 0.8"/>
     <geom name="floor" type="plane" size="30 8 .05" material="floor"/>
-    <geom name="rough_field_00" type="hfield" hfield="rough" pos="0 -6 0"/>
-    <geom name="rough_field_01" type="hfield" hfield="rough" pos="0 -3 0"/>
-    <geom name="rough_field_02" type="hfield" hfield="rough" pos="0 0 0"/>
-    <geom name="rough_field_03" type="hfield" hfield="rough" pos="0 3 0"/>
-    <geom name="rough_field_04" type="hfield" hfield="rough" pos="0 6 0"/>
-    <geom name="rough_field_10" type="hfield" hfield="rough" pos="4 -6 0"/>
-    <geom name="rough_field_11" type="hfield" hfield="rough" pos="4 -3 0"/>
-    <geom name="rough_field_12" type="hfield" hfield="rough" pos="4 0 0"/>
-    <geom name="rough_field_13" type="hfield" hfield="rough" pos="4 3 0"/>
-    <geom name="rough_field_14" type="hfield" hfield="rough" pos="4 6 0"/>
-    <geom name="rough_field_20" type="hfield" hfield="rough" pos="8 -6 0"/>
-    <geom name="rough_field_21" type="hfield" hfield="rough" pos="8 -3 0"/>
-    <geom name="rough_field_22" type="hfield" hfield="rough" pos="8 0 0"/>
-    <geom name="rough_field_23" type="hfield" hfield="rough" pos="8 3 0"/>
-    <geom name="rough_field_24" type="hfield" hfield="rough" pos="8 6 0"/>
-    <geom name="rough_field_30" type="hfield" hfield="rough" pos="12 -6 0"/>
-    <geom name="rough_field_31" type="hfield" hfield="rough" pos="12 -3 0"/>
-    <geom name="rough_field_32" type="hfield" hfield="rough" pos="12 0 0"/>
-    <geom name="rough_field_33" type="hfield" hfield="rough" pos="12 3 0"/>
-    <geom name="rough_field_34" type="hfield" hfield="rough" pos="12 6 0"/>
-    <geom name="rough_field_40" type="hfield" hfield="rough" pos="16 -6 0"/>
-    <geom name="rough_field_41" type="hfield" hfield="rough" pos="16 -3 0"/>
-    <geom name="rough_field_42" type="hfield" hfield="rough" pos="16 0 0"/>
-    <geom name="rough_field_43" type="hfield" hfield="rough" pos="16 3 0"/>
-    <geom name="rough_field_44" type="hfield" hfield="rough" pos="16 6 0"/>
-    <geom name="rough_field_50" type="hfield" hfield="rough" pos="20 -6 0"/>
-    <geom name="rough_field_51" type="hfield" hfield="rough" pos="20 -3 0"/>
-    <geom name="rough_field_52" type="hfield" hfield="rough" pos="20 0 0"/>
-    <geom name="rough_field_53" type="hfield" hfield="rough" pos="20 3 0"/>
-    <geom name="rough_field_54" type="hfield" hfield="rough" pos="20 6 0"/>
+    <geom name="rough_terrain" type="hfield" hfield="rough_large" pos="10 0 0"/>
 
     <!-- Simple wide S corridor: three straights and two broad turns. -->
     <geom name="wall_h_00" type="box" pos="3 -3 .6" size="3 .12 .6"/>
-    <geom name="wall_h_01" type="box" pos="3 -1 .6" size="3 .12 .6"/>
+    <geom name="wall_h_01" type="box" pos="3.25 -1 .6" size="3 .12 .6"/>
     <geom name="wall_v_10" type="box" pos="5 0 .6" size=".12 2 .6"/>
     <geom name="wall_v_11" type="box" pos="7 0 .6" size=".12 2 .6"/>
     <geom name="wall_h_20" type="box" pos="10 1 .6" size="4 .12 .6"/>
