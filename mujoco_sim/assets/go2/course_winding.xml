@@ -60,9 +60,9 @@
     <geom name="wall_h_41" type="box" pos="17 0 .6" size="3 .12 .6"/>
 
     <!-- A few interior boxes, spaced away from the walls and corners. -->
-    <geom name="course_box_0" type="box" pos="2 -2.35 .35" size=".3 .3 .35"/>
-    <geom name="course_box_1" type="box" pos="9 2.35 .35" size=".3 .3 .35"/>
-    <geom name="course_box_2" type="box" pos="11 1.65 .35" size=".3 .3 .35"/>
-    <geom name="course_box_3" type="box" pos="17 -1.35 .35" size=".3 .3 .35"/>
+    <geom name="course_box_0" type="box" pos="2 -2.35 .35" size=".22 .22 .35"/>
+    <geom name="course_box_1" type="box" pos="9 2.35 .35" size=".22 .22 .35"/>
+    <geom name="course_box_2" type="box" pos="11 1.65 .35" size=".22 .22 .35"/>
+    <geom name="course_box_3" type="box" pos="17 -1.35 .35" size=".22 .22 .35"/>
   </worldbody>
 </mujoco>
