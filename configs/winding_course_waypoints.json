@@ -2,7 +2,8 @@
   {"x": 2.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
   {"x": 5.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
   {"x": 8.8, "y": 0.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 10.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
+  {"x": 9.4, "y": 0.4, "radius": 0.5, "terrain": "rough"},
+  {"x": 9.8, "y": 1.1, "radius": 0.5, "terrain": "rough"},
   {"x": 10.0, "y": 2.5, "radius": 0.6, "terrain": "rough"},
   {"x": 10.0, "y": 4.5, "radius": 0.6, "terrain": "rough"},
   {"x": 10.0, "y": 6.5, "radius": 0.8, "terrain": "rough"}
