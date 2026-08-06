@@ -14,26 +14,18 @@
   </asset>
   <worldbody>
     <light pos="4 -4 8" dir="-0.2 0.2 -1" directional="true" diffuse="0.8 0.8 0.8" specular="0.4 0.4 0.4"/>
-    <site name="winding_spawn" pos="0 -2 .45" size=".08" rgba="0.1 1 0.1 0.8"/>
+    <site name="winding_spawn" pos="0 0 .45" size=".08" rgba="0.1 1 0.1 0.8"/>
     <geom name="floor" type="plane" size="30 8 .05" material="floor"/>
     <geom name="rough_terrain" type="hfield" hfield="rough_large" pos="10 0 0"/>
 
-    <!-- Simple wide S corridor: three straights and two broad turns. -->
-    <geom name="wall_h_00" type="box" pos="3 -3 .6" size="3 .12 .6"/>
-    <geom name="wall_h_01" type="box" pos="3.25 -1 .6" size="3 .12 .6"/>
-    <geom name="wall_v_10" type="box" pos="5 0 .6" size=".12 2 .6"/>
-    <geom name="wall_v_11" type="box" pos="7 0 .6" size=".12 2 .6"/>
-    <geom name="wall_h_20" type="box" pos="10 1 .6" size="4 .12 .6"/>
-    <geom name="wall_h_21" type="box" pos="10 3 .6" size="4 .12 .6"/>
-    <geom name="wall_v_30" type="box" pos="13 0.5 .6" size=".12 1.5 .6"/>
-    <geom name="wall_v_31" type="box" pos="15 0.5 .6" size=".12 1.5 .6"/>
-    <geom name="wall_h_40" type="box" pos="17 -2 .6" size="3 .12 .6"/>
-    <geom name="wall_h_41" type="box" pos="17 0 .6" size="3 .12 .6"/>
+    <!-- Straight rough corridor: the policy only needs to avoid interior boxes. -->
+    <geom name="wall_left" type="box" pos="11 2.5 .6" size="11 .12 .6"/>
+    <geom name="wall_right" type="box" pos="11 -2.5 .6" size="11 .12 .6"/>
 
-    <!-- A few interior boxes, spaced away from the walls and corners. -->
-    <geom name="course_box_0" type="box" pos="2 -2.35 .35" size=".22 .22 .35"/>
-    <geom name="course_box_1" type="box" pos="9 2.35 .35" size=".22 .22 .35"/>
-    <geom name="course_box_2" type="box" pos="11 1.65 .35" size=".22 .22 .35"/>
-    <geom name="course_box_3" type="box" pos="17 -1.35 .35" size=".22 .22 .35"/>
+    <!-- Alternating interior obstacles leave a clear side passage. -->
+    <geom name="course_box_0" type="box" pos="4 0.9 .35" size=".3 .3 .35"/>
+    <geom name="course_box_1" type="box" pos="8 -0.9 .35" size=".3 .3 .35"/>
+    <geom name="course_box_2" type="box" pos="12 0.9 .35" size=".3 .3 .35"/>
+    <geom name="course_box_3" type="box" pos="16 -0.9 .35" size=".3 .3 .35"/>
   </worldbody>
 </mujoco>
