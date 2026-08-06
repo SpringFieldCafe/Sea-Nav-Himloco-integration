@@ -182,8 +182,11 @@ def main():
     adapter = MuJoCoStateAdapter(model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode)
     records = []
     started = time.perf_counter()
+    log_handle = None
     if args.log:
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
+        if args.navigation_policy:
+            log_handle = open(args.log, "w", encoding="utf-8")
     if args.record:
         Path(args.record).parent.mkdir(parents=True, exist_ok=True)
     recorder = _Recorder(args.record, model) if args.record else None
@@ -229,23 +232,27 @@ def main():
                 data.ctrl[:] = 20 * (target - q) - .5 * dq
                 mujoco.mj_step(model, data)
                 if output is not None and step % control_steps == 0:
-                    records.append({"step": step, "raw_command": output.raw_command.tolist(),
-                                    "supervised_command": output.supervised_command.tolist(),
-                                    "himloco_action": output.himloco_action.tolist(),
-                                    "supervisor_state": output.supervisor_state,
-                                    "control_hz": output.control_hz,
-                                    "position_xy": state.position_xy.tolist(), "roll": state.roll,
-                                    "pitch": state.pitch, "min_obstacle_distance": state.min_obstacle_distance,
-                                    "collision": state.collision, "fallen": state.fallen,
-                                    "ray_mode": args.ray_mode,
-                                    "waypoint_index": waypoints.current_index,
-                                    "waypoints_total": waypoints.total,
-                                    "target_xy": waypoints.current.xy.tolist(),
-                                    "target_relative_xy": state.goal_xy.tolist(),
-                                    "target_distance": waypoints.distance(state.position_xy),
-                                    "waypoint_reached": waypoint_was_reached,
-                                    "goal_reached": waypoints.done,
-                                    "random_obstacles": obstacle_layout})
+                    record = {"step": step, "raw_command": output.raw_command.tolist(),
+                              "supervised_command": output.supervised_command.tolist(),
+                              "himloco_action": output.himloco_action.tolist(),
+                              "supervisor_state": output.supervisor_state,
+                              "control_hz": output.control_hz,
+                              "position_xy": state.position_xy.tolist(), "roll": state.roll,
+                              "pitch": state.pitch, "min_obstacle_distance": state.min_obstacle_distance,
+                              "collision": state.collision, "fallen": state.fallen,
+                              "ray_mode": args.ray_mode,
+                              "waypoint_index": waypoints.current_index,
+                              "waypoints_total": waypoints.total,
+                              "target_xy": waypoints.current.xy.tolist(),
+                              "target_relative_xy": state.goal_xy.tolist(),
+                              "target_distance": waypoints.distance(state.position_xy),
+                              "waypoint_reached": waypoint_was_reached,
+                              "goal_reached": waypoints.done,
+                              "random_obstacles": obstacle_layout}
+                    records.append(record)
+                    if log_handle is not None:
+                        log_handle.write(json.dumps(record) + "\n")
+                        log_handle.flush()
                 if stopped and args.stop_on_goal:
                     break
                 if viewer is not None:
@@ -265,7 +272,9 @@ def main():
             records = _run_himloco(model, data, args, adapter, viewer, recorder)
     if recorder is not None:
         recorder.close()
-    if args.log:
+    if log_handle is not None:
+        log_handle.close()
+    elif args.log:
         with open(args.log, "w", encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(record) + "\n")
