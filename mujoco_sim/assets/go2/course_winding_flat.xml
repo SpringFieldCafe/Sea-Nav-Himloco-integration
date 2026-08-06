@@ -22,9 +22,5 @@
     <geom name="wall_v_left" type="box" pos="8.0 4.5 .6" size=".12 4.5 .6"/>
     <geom name="wall_v_right" type="box" pos="12.0 4.5 .6" size=".12 4.5 .6"/>
 
-    <geom name="course_box_0" type="box" pos="3 0.8 .35" size=".3 .3 .35"/>
-    <geom name="course_box_1" type="box" pos="6 -0.8 .35" size=".3 .3 .35"/>
-    <geom name="course_box_2" type="box" pos="9.0 3.0 .35" size=".3 .3 .35"/>
-    <geom name="course_box_3" type="box" pos="11.0 5.5 .35" size=".3 .3 .35"/>
   </worldbody>
 </mujoco>

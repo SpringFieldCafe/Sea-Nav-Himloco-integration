@@ -10,6 +10,7 @@ class TerrainState(str, Enum):
     STAIRS_UP = "STAIRS_UP"
     STAIRS_DOWN = "STAIRS_DOWN"
     ROUGH_TERRAIN = "ROUGH_TERRAIN"
+    TURNING = "TURNING"
     RECOVERY = "RECOVERY"
     EMERGENCY_STOP = "EMERGENCY_STOP"
 
@@ -18,6 +19,9 @@ class TerrainSupervisor:
     """Rules now use terrain truth; the input can later be a perception result."""
 
     HARD_LIMITS = np.asarray([1.0, 1.0, 2.0], dtype=np.float32)
+    TURN_BEARING_THRESHOLD = 0.35
+    TURN_COMMAND_LIMITS = np.asarray([.45, .18, .45], dtype=np.float32)
+    TURN_COMMAND_DELTA = np.asarray([.12, .08, .08], dtype=np.float32)
 
     def __init__(self, speed_scale=1.0, command_filter_alpha=0.5,
                  open_space_assist=True):
@@ -39,10 +43,12 @@ class TerrainSupervisor:
             self.state = TerrainState.STAIRS_UP
         elif terrain == "stairs_down":
             self.state = TerrainState.STAIRS_DOWN
-        elif terrain == "rough":
-            self.state = TerrainState.ROUGH_TERRAIN
         elif terrain == "approach_stairs":
             self.state = TerrainState.APPROACH_STAIRS
+        elif self._is_turning(state):
+            self.state = TerrainState.TURNING
+        elif terrain == "rough":
+            self.state = TerrainState.ROUGH_TERRAIN
         else:
             self.state = TerrainState.NAVIGATE
 
@@ -53,6 +59,7 @@ class TerrainSupervisor:
             TerrainState.STAIRS_UP: (.45, .15, .50),
             TerrainState.STAIRS_DOWN: (.40, .12, .45),
             TerrainState.ROUGH_TERRAIN: (.50, .25, .55),
+            TerrainState.TURNING: tuple(self.TURN_COMMAND_LIMITS),
             TerrainState.RECOVERY: (0.0, 0.0, 0.0),
             TerrainState.EMERGENCY_STOP: (0.0, 0.0, 0.0),
         }[self.state]
@@ -67,6 +74,10 @@ class TerrainSupervisor:
         elif self.state == TerrainState.STAIRS_DOWN:
             command[0] = max(command[0], 0.10)
         command = self._stabilize_open_space(state, command)
+        if self.state == TerrainState.TURNING:
+            command = np.clip(command,
+                              self.last_command - self.TURN_COMMAND_DELTA,
+                              self.last_command + self.TURN_COMMAND_DELTA)
         command = (self.command_filter_alpha * command
                    + (1.0 - self.command_filter_alpha) * self.last_command)
         self.last_command = command
@@ -94,3 +105,10 @@ class TerrainSupervisor:
         adjusted[1] *= 1.0 - 0.65 * center_weight
         adjusted[2] *= 1.0 - 0.35 * center_weight
         return adjusted
+
+    def _is_turning(self, state):
+        """Detect a meaningful body-frame goal bearing without changing policy output."""
+        goal_x, goal_y = np.asarray(state.goal_xy, dtype=np.float32)
+        if goal_x <= 0.0:
+            return False
+        return abs(float(np.arctan2(goal_y, max(goal_x, 1e-3)))) > self.TURN_BEARING_THRESHOLD

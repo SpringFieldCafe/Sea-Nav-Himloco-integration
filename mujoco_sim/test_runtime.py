@@ -43,3 +43,13 @@ def test_supervisor_limits_stairs_and_stops_on_fall():
     command, state = supervisor.update(fallen, np.ones(3))
     assert state == TerrainState.EMERGENCY_STOP
     assert np.all(command == 0)
+
+
+def test_supervisor_enters_turning_state_and_limits_command_change():
+    state = _state("flat")
+    state.goal_xy = np.array([1.0, 1.0], dtype=np.float32)
+    supervisor = TerrainSupervisor(command_filter_alpha=1.0)
+    command, mode = supervisor.update(state, np.array([1.0, 1.0, 1.0]))
+    assert mode == TerrainState.TURNING
+    assert np.all(np.abs(command) <= supervisor.TURN_COMMAND_LIMITS)
+    assert np.all(np.abs(command) <= supervisor.TURN_COMMAND_DELTA)
