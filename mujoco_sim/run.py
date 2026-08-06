@@ -30,14 +30,15 @@ SCENES = {
     "flat_obstacle": ASSETS / "course_flat_obstacle.xml",
     "mixed_course": ASSETS / "course_mixed.xml",
     "winding_course": ASSETS / "course_winding.xml",
+    "winding_flat_turn": ASSETS / "course_winding_flat.xml",
 }
 
 
 def _terrain(scene):
-    if scene not in ("mixed_course", "winding_course"):
+    if scene not in ("mixed_course", "winding_course", "winding_flat_turn"):
         return {"stairs_up": "stairs_up", "stairs_down": "stairs_down",
                 "rough": "rough"}.get(scene, "flat")
-    return lambda _x: "rough"
+    return lambda _x: "flat" if scene == "winding_flat_turn" else "rough"
 
 
 def _reset(model, data, spawn_xy=(0.0, 0.0)):
@@ -164,7 +165,7 @@ def main():
     model = mujoco.MjModel.from_xml_path(str(SCENES[args.scene]))
     data = mujoco.MjData(model)
     spawn_xy = (0.0, 0.0)
-    if args.scene == "winding_course":
+    if args.scene in ("winding_course", "winding_flat_turn"):
         spawn_xy = tuple(model.site("winding_spawn").pos[:2])
     _reset(model, data, spawn_xy=spawn_xy)
     waypoint_path = args.waypoints
@@ -176,7 +177,7 @@ def main():
                  if waypoint_path else
                  WaypointManager.single(args.goal_x, args.goal_y, args.goal_radius))
     obstacle_layout = []
-    if args.scene in ("mixed_course", "winding_course") and args.random_obstacles:
+    if args.scene in ("mixed_course", "winding_course", "winding_flat_turn") and args.random_obstacles:
         obstacle_layout = _configure_random_obstacles(
             model, data, args.seed, waypoints, args.random_obstacle_count)
     adapter = MuJoCoStateAdapter(model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode)
