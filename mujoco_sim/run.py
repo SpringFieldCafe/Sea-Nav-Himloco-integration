@@ -163,7 +163,9 @@ def main():
         import mujoco.viewer as mujoco_viewer
     model = mujoco.MjModel.from_xml_path(str(SCENES[args.scene]))
     data = mujoco.MjData(model)
-    spawn_xy = (0.0, -2.0) if args.scene == "winding_course" else (0.0, 0.0)
+    spawn_xy = (0.0, 0.0)
+    if args.scene == "winding_course":
+        spawn_xy = tuple(model.site("winding_spawn").pos[:2])
     _reset(model, data, spawn_xy=spawn_xy)
     waypoint_path = args.waypoints
     if not waypoint_path and args.scene == "mixed_course":
