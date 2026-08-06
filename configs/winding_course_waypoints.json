@@ -1,8 +1,9 @@
 [
   {"x": 2.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 6.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
+  {"x": 5.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
+  {"x": 8.8, "y": 0.0, "radius": 0.6, "terrain": "rough"},
   {"x": 10.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 14.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 18.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 20.0, "y": 0.0, "radius": 0.8, "terrain": "rough"}
+  {"x": 10.0, "y": 2.5, "radius": 0.6, "terrain": "rough"},
+  {"x": 10.0, "y": 4.5, "radius": 0.6, "terrain": "rough"},
+  {"x": 10.0, "y": 6.5, "radius": 0.8, "terrain": "rough"}
 ]
