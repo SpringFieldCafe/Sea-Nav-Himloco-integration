@@ -1,12 +1,16 @@
 [
   {"x": 1.0, "y": -2.0, "radius": 0.6, "terrain": "rough"},
   {"x": 3.5, "y": -2.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 6.0, "y": -2.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 6.0, "y": 2.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 9.0, "y": 2.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 12.0, "y": 2.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 14.0, "y": 0.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 14.0, "y": -1.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 17.0, "y": -1.0, "radius": 0.6, "terrain": "rough"},
-  {"x": 20.0, "y": -1.0, "radius": 0.8, "terrain": "rough"}
+  {"x": 4.3, "y": -2.45, "radius": 0.5, "terrain": "rough"},
+  {"x": 5.5, "y": -2.45, "radius": 0.5, "terrain": "rough"},
+  {"x": 5.5, "y": 2.4, "radius": 0.5, "terrain": "rough"},
+  {"x": 8.0, "y": 2.0, "radius": 0.5, "terrain": "rough"},
+  {"x": 10.0, "y": 2.0, "radius": 0.5, "terrain": "rough"},
+  {"x": 12.5, "y": 2.0, "radius": 0.5, "terrain": "rough"},
+  {"x": 14.5, "y": 2.4, "radius": 0.5, "terrain": "rough"},
+  {"x": 14.5, "y": 0.5, "radius": 0.5, "terrain": "rough"},
+  {"x": 13.5, "y": 0.5, "radius": 0.5, "terrain": "rough"},
+  {"x": 13.5, "y": -1.4, "radius": 0.5, "terrain": "rough"},
+  {"x": 16.0, "y": -0.7, "radius": 0.5, "terrain": "rough"},
+  {"x": 20.0, "y": -0.7, "radius": 0.8, "terrain": "rough"}
 ]
