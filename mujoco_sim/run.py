@@ -40,9 +40,10 @@ def _terrain(scene):
     return lambda _x: "rough"
 
 
-def _reset(model, data):
+def _reset(model, data, spawn_xy=(0.0, 0.0)):
     data.qpos[:] = 0
     data.qvel[:] = 0
+    data.qpos[0:2] = np.asarray(spawn_xy, dtype=np.float64)
     data.qpos[2] = .45
     data.qpos[3:7] = [1, 0, 0, 0]
     data.qpos[7:19] = [.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]
@@ -162,7 +163,8 @@ def main():
         import mujoco.viewer as mujoco_viewer
     model = mujoco.MjModel.from_xml_path(str(SCENES[args.scene]))
     data = mujoco.MjData(model)
-    _reset(model, data)
+    spawn_xy = (0.0, -2.0) if args.scene == "winding_course" else (0.0, 0.0)
+    _reset(model, data, spawn_xy=spawn_xy)
     waypoint_path = args.waypoints
     if not waypoint_path and args.scene == "mixed_course":
         default_waypoints = Path("configs/mixed_course_waypoints.json")
