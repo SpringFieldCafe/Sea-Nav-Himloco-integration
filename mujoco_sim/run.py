@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -33,6 +34,123 @@ SCENES = {
     "winding_flat_turn": ASSETS / "course_winding_flat.xml",
 }
 
+# Match the original HIMLoco Go2 MuJoCo deployment baseline.  The official
+# deploy_mujoco_go2.py applies one symmetric +/-33.5 Nm limit to all joints.
+HIMLOCO_TORQUE_LIMITS = np.full(12, 33.5, dtype=np.float64)
+HIMLOCO_ACTION_CLIP = 100.0
+HIMLOCO_HIP_INDICES = np.asarray([0, 3, 6, 9], dtype=np.int64)
+HIMLOCO_HIP_REDUCTION = 1.0
+
+
+def _himloco_pd_torque(target, q, dq):
+    torque = 20.0 * (target - q) - 0.5 * dq
+    return np.clip(torque, -HIMLOCO_TORQUE_LIMITS, HIMLOCO_TORQUE_LIMITS)
+
+
+def _contact_diagnostics(model, data):
+    """Summarize foot contact forces and tangential slip without changing dynamics."""
+    import mujoco
+
+    feet = {name: model.body(f"{name}_calf").id
+            for name in ("FL", "FR", "RL", "RR")}
+    result = {name: {"normal_force": 0.0, "tangential_force": 0.0,
+                     "tangential_slip": 0.0, "contacts": 0}
+              for name in feet}
+    for contact_id in range(data.ncon):
+        contact = data.contact[contact_id]
+        body_ids = (model.geom_bodyid[contact.geom1], model.geom_bodyid[contact.geom2])
+        foot_names = [name for name, body_id in feet.items() if body_id in body_ids]
+        if not foot_names:
+            continue
+        force = np.zeros(6, dtype=np.float64)
+        mujoco.mj_contactForce(model, data, contact_id, force)
+        frame = np.asarray(contact.frame, dtype=np.float64).reshape(3, 3)
+        # Contact force is expressed in the contact frame: x/y tangent, z normal.
+        normal_force = max(0.0, float(force[2]))
+        tangential_force = float(np.linalg.norm(force[:2]))
+        for name in foot_names:
+            body_id = feet[name]
+            spatial = np.zeros(6, dtype=np.float64)
+            mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_BODY,
+                                     body_id, spatial, 0)
+            angular_world = frame.T @ np.zeros(3)  # initialized for clarity below
+            body_rot = np.asarray(data.xmat[body_id], dtype=np.float64).reshape(3, 3)
+            angular_world = body_rot @ spatial[:3]
+            linear_world = body_rot @ spatial[3:]
+            contact_velocity = linear_world + np.cross(
+                angular_world, np.asarray(contact.pos) - np.asarray(data.xpos[body_id]))
+            tangent_velocity = contact_velocity - frame[2] * float(np.dot(frame[2], contact_velocity))
+            result[name]["normal_force"] += normal_force
+            result[name]["tangential_force"] += tangential_force
+            result[name]["tangential_slip"] = max(
+                result[name]["tangential_slip"], float(np.linalg.norm(tangent_velocity)))
+            result[name]["contacts"] += 1
+    return result
+
+
+def _set_contact_friction(model, coefficient):
+    """Set only floor/foot sliding friction for a one-variable A/B test."""
+    coefficient = float(coefficient)
+    if coefficient <= 0.0:
+        raise ValueError("contact friction must be positive")
+    contact_geoms = {model.geom("floor").id}
+    for name in ("FL", "FR", "RL", "RR"):
+        body_id = model.body(f"{name}_calf").id
+        contact_geoms.update(
+            i for i in range(model.ngeom)
+            if model.geom_bodyid[i] == body_id and model.geom_contype[i] != 0
+        )
+    for geom_id in contact_geoms:
+        model.geom_friction[geom_id, 0] = coefficient
+
+
+def _contact_geom_ids(model):
+    ids = {model.geom("floor").id}
+    for name in ("FL", "FR", "RL", "RR"):
+        body_id = model.body(f"{name}_calf").id
+        ids.update(i for i in range(model.ngeom)
+                   if model.geom_bodyid[i] == body_id and model.geom_contype[i] != 0)
+    return ids
+
+
+def _apply_contact_ab(model, args):
+    """Apply one optional contact-solver A/B change in memory only."""
+    import mujoco
+    if args.noslip_iterations is not None:
+        model.opt.noslip_iterations = args.noslip_iterations
+    if args.friction_cone == "elliptic":
+        model.opt.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+    if args.impratio is not None:
+        model.opt.impratio = args.impratio
+    if args.contact_solref is not None:
+        for geom_id in _contact_geom_ids(model):
+            model.geom_solref[geom_id] = args.contact_solref
+    if args.contact_solimp is not None:
+        for geom_id in _contact_geom_ids(model):
+            model.geom_solimp[geom_id] = args.contact_solimp
+
+
+def _diagnostic_record(model, data, state, command, action, target):
+    body_id = model.body("base").id
+    quat = np.asarray(data.xquat[body_id], dtype=np.float64)
+    w, x, y, z = quat
+    yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return {
+        "actual_vx": float(state.linear_velocity[0]),
+        "actual_vy": float(state.linear_velocity[1]),
+        "actual_wz": float(state.angular_velocity[2]),
+        "actual_linear_velocity": np.asarray(state.linear_velocity).tolist(),
+        "actual_angular_velocity": np.asarray(state.angular_velocity).tolist(),
+        "gravity": np.asarray(state.gravity).tolist(),
+        "roll": float(state.roll), "pitch": float(state.pitch), "yaw": float(yaw),
+        "joint_position": np.asarray(state.joint_position).tolist(),
+        "joint_velocity": np.asarray(state.joint_velocity).tolist(),
+        "policy_action": np.asarray(action).tolist(),
+        "target_position": np.asarray(target).tolist(),
+        "torque": np.asarray(data.ctrl).tolist(),
+        "foot_contacts": _contact_diagnostics(model, data),
+    }
+
 
 def _terrain(scene):
     if scene not in ("mixed_course", "winding_course", "winding_flat_turn"):
@@ -45,7 +163,8 @@ def _reset(model, data, spawn_xy=(0.0, 0.0)):
     data.qpos[:] = 0
     data.qvel[:] = 0
     data.qpos[0:2] = np.asarray(spawn_xy, dtype=np.float64)
-    data.qpos[2] = .45
+    # Match HIMLoco's original deploy_mujoco Go2 reset.
+    data.qpos[2] = .35
     data.qpos[3:7] = [1, 0, 0, 0]
     data.qpos[7:19] = [.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]
     __import__("mujoco").mj_forward(model, data)
@@ -94,15 +213,28 @@ def _run_himloco(model, data, args, adapter, viewer=None, recorder=None):
     obs = HIMLocoObservation(torch.device(args.device))
     default = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5], dtype=np.float32)
     action = np.zeros(12, dtype=np.float32)
-    command = np.asarray([args.vx, args.vy, args.wz], dtype=np.float32)
+    requested_command = np.asarray([args.vx, args.vy, args.wz], dtype=np.float32)
+    # Pre-roll keeps the requested forward speed but suppresses yaw, matching
+    # the requested stable straight-walking phase before turning.
+    command_target = np.array([0.5, 0.0, 0.0], dtype=np.float32)
+    command = np.array([0.5, 0.0, 0.0], dtype=np.float32)
     records = []
     control_steps = max(1, int(round(.02 / model.opt.timestep)))
     for step in range(args.steps):
         q = data.qpos[7:19]
         dq = data.qvel[6:18]
-        data.ctrl[:] = 20 * (default + action * .25 - q) - .5 * dq
+        action_scaled = np.clip(action, -HIMLOCO_ACTION_CLIP, HIMLOCO_ACTION_CLIP) * .25
+        action_scaled[HIMLOCO_HIP_INDICES] *= HIMLOCO_HIP_REDUCTION
+        data.ctrl[:] = _himloco_pd_torque(default + action_scaled, q, dq)
         __import__("mujoco").mj_step(model, data)
-        if step % control_steps == 0:
+        # Match the official deploy_mujoco loop: infer after a complete
+        # decimation window, then apply the new target on the next step.
+        if (step + 1) % control_steps == 0:
+            elapsed_s = (step + 1) * model.opt.timestep
+            if elapsed_s >= args.stable_pre_roll:
+                command_target = requested_command
+            alpha = float(args.himloco_command_filter_alpha)
+            command = alpha * command_target + (1.0 - alpha) * command
             state = adapter.read([args.goal_x, args.goal_y])
             torch_state = {k: torch.from_numpy(v).reshape(1, -1).to(args.device) for k, v in
                            {"command": command, "angular": state.angular_velocity,
@@ -110,14 +242,31 @@ def _run_himloco(model, data, args, adapter, viewer=None, recorder=None):
                             "dq": state.joint_velocity}.items()}
             inp = obs.build(torch_state["command"], torch_state["angular"], torch_state["gravity"], torch_state["q"], torch_state["dq"])
             action = infer(policy, inp, 12)[0].cpu().numpy()
+            action = np.clip(action, -HIMLOCO_ACTION_CLIP, HIMLOCO_ACTION_CLIP)
             obs.record_action(torch.from_numpy(action).reshape(1, -1))
-            records.append({"step": step, "himloco_action": action.tolist(), "terrain": state.terrain_hint,
+            next_target = default + action * .25
+            records.append({"step": step, "command_target": command_target.tolist(),
+                            "requested_command": requested_command.tolist(),
+                            "stable_pre_roll_s": args.stable_pre_roll,
+                            "command": command.tolist(), "himloco_action": action.tolist(), "terrain": state.terrain_hint,
                             "position_xy": state.position_xy.tolist(), "roll": state.roll,
                             "pitch": state.pitch, "min_obstacle_distance": state.min_obstacle_distance,
-                            "collision": state.collision, "fallen": state.fallen})
+                            "collision": state.collision, "fallen": state.fallen,
+                            "diagnostics": _diagnostic_record(
+                                model, data, state, command, action, next_target),
+                            "observation": inp[0].detach().cpu().numpy().tolist(),
+                            "one_step_observation": inp[0, :45].detach().cpu().numpy().tolist(),
+                            "command_observation": (command * np.asarray([2.0, 2.0, 0.25])).tolist(),
+                            "base_ang_vel_raw": state.angular_velocity.tolist(),
+                            "base_ang_vel_observation": (state.angular_velocity * 0.25).tolist(),
+                            "projected_gravity_raw": state.gravity.tolist(),
+                            "dof_pos_raw": (state.joint_position - default).tolist(),
+                            "dof_pos_observation": (state.joint_position - default).tolist(),
+                            "dof_vel_raw": state.joint_velocity.tolist(),
+                            "dof_vel_observation": (state.joint_velocity * 0.05).tolist()})
         if viewer is not None:
             viewer.sync()
-        if recorder is not None and step % control_steps == 0:
+        if recorder is not None and (step + 1) % control_steps == 0:
             recorder.write(model, data)
     return records
 
@@ -132,6 +281,10 @@ def main():
     parser.add_argument("--vx", type=float, default=.5)
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--wz", type=float, default=0.0)
+    parser.add_argument("--himloco-command-filter-alpha", type=float, default=1.0,
+                        help="HIMLoco command filter alpha; 0.15 matches continuous-turning training")
+    parser.add_argument("--stable-pre-roll", type=float, default=0.0,
+                        help="zero-command stabilization time before target command (seconds)")
     parser.add_argument("--steps", type=int, default=30000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
@@ -142,6 +295,20 @@ def main():
     parser.add_argument("--waypoints", default="")
     parser.add_argument("--goal-radius", type=float, default=0.5)
     parser.add_argument("--ray-mode", choices=("grid2ray", "physical_lidar"), default="grid2ray")
+    parser.add_argument("--angular-velocity-source", choices=("cvel", "qvel"), default="cvel",
+                        help="MuJoCo angular velocity source; qvel matches official HIMLoco deploy")
+    parser.add_argument("--contact-friction", type=float, default=None,
+                        help="A/B test: set floor and foot sliding friction only")
+    parser.add_argument("--noslip-iterations", type=int, default=None,
+                        help="A/B test: MuJoCo noslip iterations")
+    parser.add_argument("--friction-cone", choices=("pyramidal", "elliptic"), default="pyramidal")
+    parser.add_argument("--impratio", type=float, default=None,
+                        help="A/B test: elliptic friction cone impedance ratio")
+    parser.add_argument("--contact-solref", type=float, nargs=2, default=None,
+                        metavar=("TIMEConst", "DAMPING"), help="A/B test contact solref")
+    parser.add_argument("--contact-solimp", type=float, nargs=5, default=None,
+                        metavar=("D0", "DWidth", "Width", "Midpoint", "Power"),
+                        help="A/B test contact solimp")
     parser.add_argument("--draw-goal", action="store_true")
     parser.add_argument("--stop-on-goal", action="store_true")
     parser.add_argument("--speed-scale", type=float, default=1.0,
@@ -155,6 +322,10 @@ def main():
     parser.add_argument("--random-obstacle-count", type=int, default=10,
                         help="number of extra boxes, 0-10, when random obstacles are enabled")
     args = parser.parse_args()
+    if not 0.0 < args.himloco_command_filter_alpha <= 1.0:
+        parser.error("--himloco-command-filter-alpha must be in (0, 1]")
+    if args.stable_pre_roll < 0.0:
+        parser.error("--stable-pre-roll must be non-negative")
     np.random.seed(args.seed)
     if args.record and not args.viewer:
         os.environ.setdefault("MUJOCO_GL", "egl")
@@ -163,6 +334,9 @@ def main():
     if args.viewer and not args.no_viewer:
         import mujoco.viewer as mujoco_viewer
     model = mujoco.MjModel.from_xml_path(str(SCENES[args.scene]))
+    _apply_contact_ab(model, args)
+    if args.contact_friction is not None:
+        _set_contact_friction(model, args.contact_friction)
     data = mujoco.MjData(model)
     spawn_xy = (0.0, 0.0)
     if args.scene in ("winding_course", "winding_flat_turn"):
@@ -180,7 +354,10 @@ def main():
     if args.scene in ("mixed_course", "winding_course", "winding_flat_turn") and args.random_obstacles:
         obstacle_layout = _configure_random_obstacles(
             model, data, args.seed, waypoints, args.random_obstacle_count)
-    adapter = MuJoCoStateAdapter(model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode)
+    adapter = MuJoCoStateAdapter(
+        model, data, waypoints.current.xy, _terrain(args.scene), args.ray_mode,
+        args.angular_velocity_source,
+    )
     records = []
     started = time.perf_counter()
     log_handle = None
@@ -226,11 +403,14 @@ def main():
                         if waypoint_was_reached:
                             state = adapter.read(waypoints.current.xy)
                         output = core.step(state)
-                    target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]) + output.himloco_action * .25
+                    action = np.clip(output.himloco_action, -HIMLOCO_ACTION_CLIP, HIMLOCO_ACTION_CLIP)
+                    action_scaled = action * .25
+                    action_scaled[HIMLOCO_HIP_INDICES] *= HIMLOCO_HIP_REDUCTION
+                    target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5]) + action_scaled
                     if stopped:
                         target = np.array([.1, .8, -1.5, -.1, .8, -1.5, .1, 1, -1.5, -.1, 1, -1.5])
                 q, dq = data.qpos[7:19], data.qvel[6:18]
-                data.ctrl[:] = 20 * (target - q) - .5 * dq
+                data.ctrl[:] = _himloco_pd_torque(target, q, dq)
                 mujoco.mj_step(model, data)
                 if output is not None and step % control_steps == 0:
                     record = {"step": step, "raw_command": output.raw_command.tolist(),
@@ -295,6 +475,7 @@ def main():
                "max_roll": max_roll, "max_pitch": max_pitch,
                "min_obstacle_distance": min_distance,
                "ray_mode": args.ray_mode,
+               "angular_velocity_source": args.angular_velocity_source,
                "waypoints_total": waypoints.total,
                "waypoints_reached": len(waypoints.reached_indices),
                "current_waypoint_index": waypoints.current_index,

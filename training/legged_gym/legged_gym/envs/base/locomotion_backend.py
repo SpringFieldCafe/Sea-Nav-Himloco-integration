@@ -179,6 +179,18 @@ class HIMLocoBackend(LocomotionBackend):
         self.command_clipped_samples = 0
         self.command_min = torch.full((3,), float("inf"), device=env.device)
         self.command_max = torch.full((3,), float("-inf"), device=env.device)
+        self.last_observation = None
+        self.last_one_step_observation = None
+        self.last_policy_action = None
+        self.last_command = None
+        self.last_raw_angular_velocity = None
+        self.last_raw_gravity = None
+        self.last_raw_dof_position = None
+        self.last_raw_dof_velocity = None
+        self.last_scaled_command = None
+        self.last_scaled_angular_velocity = None
+        self.last_scaled_dof_position = None
+        self.last_scaled_dof_velocity = None
 
         self.policy_to_sim = self._build_joint_mapping(env.dof_names)
         self.policy_to_sim_device = self.policy_to_sim.to(env.device)
@@ -283,6 +295,14 @@ class HIMLocoBackend(LocomotionBackend):
             ),
             dim=-1,
         )
+        self.last_raw_angular_velocity = env.base_ang_vel[:, :3].detach().clone()
+        self.last_raw_gravity = env.projected_gravity.detach().clone()
+        self.last_raw_dof_position = joint_pos.detach().clone()
+        self.last_raw_dof_velocity = joint_vel.detach().clone()
+        self.last_scaled_command = (command * torch.tensor(self.contract.command_scale, device=env.device)).detach().clone()
+        self.last_scaled_angular_velocity = (env.base_ang_vel[:, :3] * self.contract.angular_velocity_scale).detach().clone()
+        self.last_scaled_dof_position = (joint_pos * self.contract.dof_position_scale).detach().clone()
+        self.last_scaled_dof_velocity = (joint_vel * self.contract.dof_velocity_scale).detach().clone()
         if one_step.shape[-1] != self.num_one_step_obs:
             raise RuntimeError(f"HIMLoco observation must be 45D, got {one_step.shape[-1]}")
         if not torch.isfinite(one_step).all():
@@ -299,6 +319,10 @@ class HIMLocoBackend(LocomotionBackend):
         with torch.inference_mode():
             policy_action = self.policy(policy_input)
         self._assert_policy_output(policy_action, env.num_envs)
+        self.last_observation = policy_input.detach().clone()
+        self.last_one_step_observation = one_step.detach().clone()
+        self.last_policy_action = policy_action.detach().clone()
+        self.last_command = command.detach().clone()
         sim_action = torch.zeros_like(policy_action)
         sim_action[:, self.policy_to_sim_device] = policy_action
         return sim_action

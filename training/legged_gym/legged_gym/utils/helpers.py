@@ -190,6 +190,9 @@ def get_args():
         {"name": "--viewer", "action": "store_true", "default": False, "help": "Create an Isaac Gym viewer for smoke tests."},
         {"name": "--smoke_steps", "type": int, "default": None, "help": "Limit zero-command smoke-test steps."},
         {"name": "--smoke_command", "type": str, "default": "0,0,0", "help": "Navigation command VX,VY,WZ for smoke tests."},
+        {"name": "--smoke_pre_roll", "type": float, "default": 0.0, "help": "Fixed-command smoke pre-roll in seconds."},
+        {"name": "--smoke_command_filter_alpha", "type": float, "default": 1.0, "help": "Fixed-command smoke command filter alpha."},
+        {"name": "--contract_log", "type": str, "default": "", "help": "Optional JSONL log for HIMLoco contract diagnostics."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(

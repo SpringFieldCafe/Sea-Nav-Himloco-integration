@@ -43,7 +43,17 @@ import numpy as np
 import torch
 import time
 import cv2
+import json
 from isaacgym import gymapi
+
+
+def _roll_pitch_from_quat(quat):
+    """Return absolute roll/pitch from Isaac Gym xyzw quaternions."""
+    x, y, z, w = quat.unbind(dim=-1)
+    roll = torch.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    pitch_arg = torch.clamp(2.0 * (w * y - z * x), -1.0, 1.0)
+    pitch = torch.asin(pitch_arg)
+    return roll, pitch
 
     
 def play(args):
@@ -81,19 +91,34 @@ def play(args):
     env_cfg.env.debug_viz = True
     env_cfg.asset.terminate_after_contacts_on = [] # no termination
 
+    fixed_command_test = args.smoke_steps is not None
+    if fixed_command_test:
+        # Bypass the training command callback for a clean HIMLoco contract
+        # test. The command is injected through LeggedRobotPos.step().
+        env_cfg.commands.continuous_turning = False
+        env_cfg.commands.heading_command = False
+        env_cfg.commands.alpha = 1.0
+        env_cfg.domain_rand.push_robots = False
+
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     obs = env.get_observations()
 
-    # load policy
-    train_cfg.runner.resume = True
-    train_cfg.runner.load_run = -1
-    train_cfg.runner.checkpoint = -1
-
-    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
-    policy = ppo_runner.get_inference_policy(device=env.device)
-    print('Loaded policy from: ', task_registry.loaded_policy_path)
-    print(f"Navigation forward speed scale: {args.navigation_speed_scale:.3f}")
+    # A fixed-command smoke test exercises HIMLoco directly.  It must not
+    # load a SEA-Nav TorchScript export through the PPO checkpoint loader.
+    if fixed_command_test:
+        policy = None
+        print("Running HIMLoco fixed-command smoke test; navigation policy is bypassed.")
+    else:
+        train_cfg.runner.resume = True
+        train_cfg.runner.load_run = -1
+        train_cfg.runner.checkpoint = -1
+        ppo_runner, train_cfg = task_registry.make_alg_runner(
+            env=env, name=args.task, args=args, train_cfg=train_cfg
+        )
+        policy = ppo_runner.get_inference_policy(device=env.device)
+        print('Loaded policy from: ', task_registry.loaded_policy_path)
+        print(f"Navigation forward speed scale: {args.navigation_speed_scale:.3f}")
 
     def navigation_policy(observations):
         with torch.inference_mode():
@@ -130,12 +155,86 @@ def play(args):
     obs, _ = env.reset()
     episode_count = 0
 
+    max_steps = args.smoke_steps if fixed_command_test else 100 * int(env.max_episode_length)
+    max_roll = 0.0
+    max_pitch = 0.0
+    reset_count = 0
+    contract_handle = open(args.contract_log, "w", encoding="utf-8") if args.contract_log else None
+    target_command = torch.tensor(args.smoke_command, device=env.device, dtype=torch.float32).unsqueeze(0)
+    target_command = target_command.repeat(env.num_envs, 1)
+    pre_roll_command = target_command.clone()
+    pre_roll_command[:, 2] = 0.0
+    command = pre_roll_command.clone()
+    alpha = float(args.smoke_command_filter_alpha)
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError("--smoke_command_filter_alpha must be in (0, 1]")
+
     with torch.inference_mode():
-        for i in range(100 * int(env.max_episode_length)):
+        for i in range(max_steps):
             # Step the environment
-            actions = navigation_policy(obs.detach())
-            actions[:, 0] *= args.navigation_speed_scale
+            if fixed_command_test:
+                if i * float(env.dt) < float(args.smoke_pre_roll):
+                    desired = pre_roll_command
+                else:
+                    desired = target_command
+                command = alpha * desired + (1.0 - alpha) * command
+                actions = command
+            else:
+                actions = navigation_policy(obs.detach())
+                actions[:, 0] *= args.navigation_speed_scale
             obs, _, rews, dones, infos = env.step(actions)
+            roll, pitch = _roll_pitch_from_quat(env.base_quat)
+            if contract_handle is not None and fixed_command_test:
+                backend = env.locomotion_backend
+                def tensor_row(value):
+                    if value is None:
+                        return None
+                    return value[0].detach().cpu().numpy().tolist()
+                q_target = env.default_dof_pos[0] + env.actions[0, :12] * float(
+                    backend.control_params()["action_scale"]
+                )
+                row = {
+                    "step": i,
+                    "time_s": float((i + 1) * env.dt),
+                    "command": tensor_row(backend.last_command),
+                    "command_scale": list(backend.contract.command_scale),
+                    "command_observation": tensor_row(backend.last_scaled_command),
+                    "observation": tensor_row(backend.last_observation),
+                    "one_step_observation": tensor_row(backend.last_one_step_observation),
+                    "policy_action": tensor_row(backend.last_policy_action),
+                    "target_position": tensor_row(q_target.unsqueeze(0)),
+                    "torque": tensor_row(env.torques),
+                    "base_ang_vel": tensor_row(env.base_ang_vel),
+                    "base_ang_vel_raw": tensor_row(backend.last_raw_angular_velocity),
+                    "base_ang_vel_scale": float(backend.contract.angular_velocity_scale),
+                    "base_ang_vel_observation": tensor_row(backend.last_scaled_angular_velocity),
+                    "projected_gravity": tensor_row(env.projected_gravity),
+                    "projected_gravity_raw": tensor_row(backend.last_raw_gravity),
+                    "dof_pos": tensor_row(env.dof_pos),
+                    "dof_pos_raw": tensor_row(backend.last_raw_dof_position),
+                    "dof_pos_scale": float(backend.contract.dof_position_scale),
+                    "dof_pos_observation": tensor_row(backend.last_scaled_dof_position),
+                    "dof_vel": tensor_row(env.dof_vel),
+                    "dof_vel_raw": tensor_row(backend.last_raw_dof_velocity),
+                    "dof_vel_scale": float(backend.contract.dof_velocity_scale),
+                    "dof_vel_observation": tensor_row(backend.last_scaled_dof_velocity),
+                    "contact_forces": tensor_row(env.contact_forces[:, env.feet_indices, :].reshape(env.num_envs, -1)),
+                    "roll": float(roll[0].item()),
+                    "pitch": float(pitch[0].item()),
+                    "done": bool(dones[0].item()),
+                    "reset_reason": {
+                        "timeout": bool(getattr(env, "time_out_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
+                        "termination_contact": bool(getattr(env, "terminate_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
+                        "goal": bool(getattr(env, "goal_reached_flag", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
+                        "fall": bool(getattr(env, "fall_down", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
+                        "other": bool(dones[0].item()) and not bool(getattr(env, "time_out_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()) and not bool(getattr(env, "terminate_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
+                    },
+                }
+                contract_handle.write(json.dumps(row) + "\n")
+                contract_handle.flush()
+            max_roll = max(max_roll, float(torch.abs(roll).max().item()))
+            max_pitch = max(max_pitch, float(torch.abs(pitch).max().item()))
+            reset_count += int(dones.sum().item())
             env.gym.set_camera_location(camera_handle, env.envs[0], gymapi.Vec3(5.0, 5.0, 7.0), gymapi.Vec3(4.99, 5.0, 0.0))
 
             if dones.any():
@@ -180,6 +279,20 @@ def play(args):
                     video = None
                 RECORD_VIDEO = False
                 SAVE_IMAGES = False
+
+    if contract_handle is not None:
+        contract_handle.close()
+
+    if fixed_command_test:
+        print({
+            "mode": "himloco_fixed_command",
+            "command": args.smoke_command,
+            "steps": args.smoke_steps,
+            "max_roll": max_roll,
+            "max_pitch": max_pitch,
+            "resets": reset_count,
+            "policy": os.path.abspath(args.himloco_policy) if args.himloco_policy else None,
+        })
 
 
 if __name__ == '__main__':

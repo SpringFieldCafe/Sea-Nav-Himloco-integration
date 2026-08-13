@@ -12,8 +12,10 @@ from .state import UnifiedState
 
 def _gravity_and_rpy(quat):
     w, x, y, z = np.asarray(quat, dtype=np.float64)
-    gravity = np.array([2 * (-z * x + w * y), -2 * (z * y + w * x),
-                        1 - 2 * (w * w + z * z)], dtype=np.float32)
+    # Match Isaac Gym's projected_gravity: world gravity is [0, 0, -1].
+    # R^T * [0, 0, -1] for MuJoCo/Isaac's [w, x, y, z] quaternion order.
+    gravity = np.array([2 * (w * y - x * z), -2 * (w * x + y * z),
+                        -1 + 2 * (x * x + y * y)], dtype=np.float32)
     roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
     pitch = math.asin(np.clip(2 * (w * y - z * x), -1.0, 1.0))
     return gravity, roll, pitch
@@ -29,13 +31,17 @@ class StateAdapter:
 class MuJoCoStateAdapter(StateAdapter):
     """Read named Go2 state and a 41-ray body-frame lidar from MuJoCo."""
 
-    def __init__(self, model, data, goal_xy, terrain_hint="flat", ray_mode="grid2ray"):
+    def __init__(self, model, data, goal_xy, terrain_hint="flat", ray_mode="grid2ray",
+                 angular_velocity_source="cvel"):
         self.model, self.data = model, data
         self.goal_xy = np.asarray(goal_xy, dtype=np.float32)
         self.terrain_hint = terrain_hint
         if ray_mode not in ("grid2ray", "physical_lidar"):
             raise ValueError("ray_mode must be grid2ray or physical_lidar")
         self.ray_mode = ray_mode
+        if angular_velocity_source not in ("cvel", "qvel"):
+            raise ValueError("angular_velocity_source must be cvel or qvel")
+        self.angular_velocity_source = angular_velocity_source
         self.joint_ids = [model.joint(name).id for name in (
             "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
             "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
@@ -140,11 +146,14 @@ class MuJoCoStateAdapter(StateAdapter):
         quat = self.data.xquat[body_id]
         gravity, roll, pitch = _gravity_and_rpy(quat)
         rot = np.asarray(self.data.xmat[body_id]).reshape(3, 3)
-        # MuJoCo cvel is already expressed in the body's local frame.
-        # Applying rot.T here a second time corrupts the velocity directions
-        # sent to both SEA-Nav and HIMLoco when the robot yaws.
+        # Official HIMLoco MuJoCo deploy reads qvel[3:6] in world coordinates
+        # and rotates it into the body frame. Keep cvel as an explicit A/B
+        # option because MuJoCo cvel is already body-local.
         lin = np.asarray(self.data.cvel[body_id, 3:6])
-        ang = np.asarray(self.data.cvel[body_id, :3])
+        if self.angular_velocity_source == "qvel":
+            ang = rot.T @ np.asarray(self.data.qvel[3:6])
+        else:
+            ang = np.asarray(self.data.cvel[body_id, :3])
         q = np.asarray([self.data.qpos[self.model.jnt_qposadr[j]] for j in self.joint_ids])
         dq = np.asarray([self.data.qvel[self.model.jnt_dofadr[j]] for j in self.joint_ids])
         position = self.data.xpos[body_id][:2].astype(np.float32)
@@ -157,7 +166,8 @@ class MuJoCoStateAdapter(StateAdapter):
                              roll, pitch, terrain_hint,
                              float(np.min(rays)),
                              self._obstacle_collision(), abs(roll) > 1.0 or abs(pitch) > 1.0,
-                             time.monotonic(), {"ray_mode": self.ray_mode})
+                             time.monotonic(), {"ray_mode": self.ray_mode,
+                                                "angular_velocity_source": self.angular_velocity_source})
         state.validate()
         return state
 

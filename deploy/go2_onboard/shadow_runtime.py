@@ -37,8 +37,9 @@ def _quat_to_gravity(quaternion):
     w, x, y, z = [float(v) for v in q]
     # R^T * [0, 0, -1], matching quat_rotate_inverse(base_quat, gravity_vec).
     # Keep the same [w, x, y, z] convention as HIMLoco's deployment helper.
-    return torch.tensor([[2.0 * (-z * x + w * y), -2.0 * (z * y + w * x),
-                          1.0 - 2.0 * (w * w + z * z)]], dtype=torch.float32)
+    # Match Isaac Gym's projected_gravity: world gravity is [0, 0, -1].
+    return torch.tensor([[2.0 * (w * y - x * z), -2.0 * (w * x + y * z),
+                          -1.0 + 2.0 * (x * x + y * y)]], dtype=torch.float32)
 
 
 def parse_args():
