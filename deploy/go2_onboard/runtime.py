@@ -70,7 +70,7 @@ class OnboardRuntime:
             goal_xy=[args.goal_x, args.goal_y] if args.goal_x is not None and args.goal_y is not None else None,
             log_interval=args.log_interval,
         )
-        self.reader = RosStateReader(Topics(args))
+        self.reader = RosStateReader(Topics(args), max_sensor_age=args.max_sensor_age)
         self.goal_manager = GoalManager()
         self.safety = SafetySupervisor(self.config.max_sensor_age)
         self.logger = JsonlLogger(args.log)
@@ -132,9 +132,9 @@ class OnboardRuntime:
             self.logger.close()
 
     def _sensor_cycle(self, cycle_start):
-        health = self.reader.health()
+        health = self.reader.health(self.config.max_sensor_age)
         deadline_miss = _ms(cycle_start) > self.rate * 1000.0
-        report = self.safety.evaluate(health["ages"], mode="sensor", values=health["finite_values"],
+        report = self.safety.evaluate(health["sensor_ages"], mode="sensor", values=health["finite_values"],
                                       deadline_miss=deadline_miss, wireless_emergency=health["wireless_emergency"])
         record = {"mode": "sensor", "timestamp": time.time(), "runtime_state": report.state.value,
                   "fault_reason": report.fault_reason, "sensor": health, "loop_latency_ms": _ms(cycle_start)}
@@ -142,7 +142,7 @@ class OnboardRuntime:
             self.logger.write(record)
 
     def _shadow_cycle(self, cycle_start):
-        health = self.reader.health()
+        health = self.reader.health(self.config.max_sensor_age)
         required = (self.reader.lowstate.value, self.reader.lidar.value, self.reader.odom.value,
                     self.goal_manager.current)
         if any(value is None for value in required):

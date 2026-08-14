@@ -15,7 +15,19 @@ class Latest:
     child_frame_id: str = ""
     count: int = 0
     frequency_hz: float = 0.0
+    last_period_s: float = 0.0
+    max_gap_s: float = 0.0
+    gap_count: int = 0
+    stale_count: int = 0
+    message_type: str = ""
+    point_count: int = 0
+    finite_point_count: int = 0
+    invalid_point_count: int = 0
+    range_min_m: float = 0.0
+    range_max_m: float = 0.0
+    near_origin_point_count: int = 0
     _previous_received_at: float = 0.0
+    _stale_reported: bool = False
 
     @property
     def age(self):
@@ -25,7 +37,21 @@ class Latest:
         return {
             "age_s": self.age,
             "frequency_hz": self.frequency_hz,
+            "last_period_s": self.last_period_s,
+            "max_gap_s": self.max_gap_s,
+            "gap_count": self.gap_count,
+            "stale_count": self.stale_count,
             "count": self.count,
+            "message_type": self.message_type,
+            "point_count": self.point_count,
+            "finite_point_count": self.finite_point_count,
+            "invalid_point_count": self.invalid_point_count,
+            "finite_ratio": (
+                self.finite_point_count / self.point_count if self.point_count else 0.0
+            ),
+            "range_min_m": self.range_min_m,
+            "range_max_m": self.range_max_m,
+            "near_origin_point_count": self.near_origin_point_count,
             "frame_id": self.frame_id,
             "child_frame_id": self.child_frame_id,
             "source_timestamp": self.source_timestamp,
@@ -46,6 +72,7 @@ class OdomData:
     linear_velocity: np.ndarray
     angular_velocity: np.ndarray
     position: np.ndarray
+    orientation_quaternion: np.ndarray = None
     frame_id: str = ""
     child_frame_id: str = ""
 
@@ -53,12 +80,19 @@ class OdomData:
 class RosStateReader:
     """Subscribes only to sensor/state topics; never creates /lowcmd."""
 
-    def __init__(self, topics):
+    def __init__(self, topics, max_sensor_age=0.25):
         import rclpy
         from nav_msgs.msg import Odometry
         from sensor_msgs.msg import PointCloud2
         from unitree_go.msg import LowState, WirelessController
         from geometry_msgs.msg import PointStamped
+
+        self._rclpy = rclpy
+        self._owns_rclpy = False
+        self.max_sensor_age = float(max_sensor_age)
+        if not rclpy.ok():
+            rclpy.init(args=None)
+            self._owns_rclpy = True
 
         self.lowstate = Latest()
         self.lidar = Latest()
@@ -78,6 +112,10 @@ class RosStateReader:
         if slot.received_at:
             period = now - slot.received_at
             if period > 0:
+                slot.last_period_s = period
+                slot.max_gap_s = max(slot.max_gap_s, period)
+                if period > self.max_sensor_age:
+                    slot.gap_count += 1
                 slot.frequency_hz = 1.0 / period
         slot._previous_received_at = slot.received_at
         slot.value = value
@@ -86,6 +124,8 @@ class RosStateReader:
         slot.source_timestamp = _message_timestamp(message)
         slot.frame_id = _message_frame_id(message)
         slot.child_frame_id = str(getattr(message, "child_frame_id", "") or "")
+        if message is not None:
+            slot.message_type = f"{type(message).__module__}.{type(message).__name__}"
 
     def _lowstate_callback(self, msg):
         motors = getattr(msg, "motor_state", getattr(msg, "motor_states", None))
@@ -102,8 +142,25 @@ class RosStateReader:
 
     def _lidar_callback(self, msg):
         from sensor_msgs_py import point_cloud2
-        points = list(point_cloud2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True))
-        self._store(self.lidar, np.asarray(points, dtype=np.float32).reshape((-1, 3)), msg)
+        raw = np.asarray(
+            list(point_cloud2.read_points(msg, field_names=("x", "y", "z"), skip_nans=False)),
+            dtype=np.float32,
+        ).reshape((-1, 3))
+        finite = np.isfinite(raw).all(axis=1)
+        points = raw[finite]
+        self._store(self.lidar, points, msg)
+        self.lidar.point_count = int(raw.shape[0])
+        self.lidar.finite_point_count = int(finite.sum())
+        self.lidar.invalid_point_count = int((~finite).sum())
+        if points.size:
+            ranges = np.linalg.norm(points[:, :2], axis=1)
+            self.lidar.range_min_m = float(ranges.min())
+            self.lidar.range_max_m = float(ranges.max())
+            self.lidar.near_origin_point_count = int((ranges < 0.15).sum())
+        else:
+            self.lidar.range_min_m = 0.0
+            self.lidar.range_max_m = 0.0
+            self.lidar.near_origin_point_count = 0
 
     def _odom_callback(self, msg):
         twist = msg.twist.twist
@@ -112,6 +169,12 @@ class RosStateReader:
             linear_velocity=np.asarray([twist.linear.x, twist.linear.y, twist.linear.z], dtype=np.float32),
             angular_velocity=np.asarray([twist.angular.x, twist.angular.y, twist.angular.z], dtype=np.float32),
             position=np.asarray([position.x, position.y, position.z], dtype=np.float32),
+            orientation_quaternion=np.asarray([
+                msg.pose.pose.orientation.w,
+                msg.pose.pose.orientation.x,
+                msg.pose.pose.orientation.y,
+                msg.pose.pose.orientation.z,
+            ], dtype=np.float32),
             frame_id=_message_frame_id(msg),
             child_frame_id=str(getattr(msg, "child_frame_id", "") or ""),
         ), msg)
@@ -133,20 +196,30 @@ class RosStateReader:
 
     def close(self):
         self.node.destroy_node()
+        if self._owns_rclpy and self._rclpy.ok():
+            self._rclpy.shutdown()
 
-    def health(self):
+    def health(self, max_sensor_age=0.25):
+        for slot in (self.lowstate, self.lidar, self.odom, self.wireless, self.goal):
+            age = slot.age
+            stale = age is None or age > float(max_sensor_age)
+            if stale and not slot._stale_reported:
+                slot.stale_count += 1
+            slot._stale_reported = stale
         values = []
         for slot in (self.lowstate, self.lidar, self.odom, self.wireless, self.goal):
             if slot.value is not None:
                 values.append(slot.value if not hasattr(slot.value, "__dict__") else _dataclass_values(slot.value))
+        ages = {
+            "lowstate": self.lowstate.age,
+            "lidar": self.lidar.age,
+            "odom": self.odom.age,
+            "wireless": self.wireless.age,
+            "goal": self.goal.age,
+        }
         return {
-            "ages": {
-                "lowstate": self.lowstate.age,
-                "lidar": self.lidar.age,
-                "odom": self.odom.age,
-                "wireless": self.wireless.age,
-                "goal": self.goal.age,
-            },
+            "ages": ages,
+            "sensor_ages": {name: ages[name] for name in ("lowstate", "lidar", "odom", "wireless")},
             "streams": {
                 "lowstate": self.lowstate.summary(),
                 "lidar": self.lidar.summary(),

@@ -13,6 +13,8 @@ from deploy.go2_onboard.joint_mapping import make_motor_to_policy, make_policy_t
 from deploy.go2_onboard.lidar_ray_adapter import LidarRayAdapter
 from deploy.go2_onboard.model_loader import load_himloco_policy, load_navigation_policy
 from deploy.go2_onboard.navigation_observation import NavigationObservation
+from deploy.go2_onboard.diagnostics import _ros_value
+from deploy.go2_onboard.ros_state_reader import Latest
 from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor
 
 
@@ -97,6 +99,41 @@ def test_command_filter_is_bounded_and_explicit():
     bridge = ReadOnlyCommandBridge([-1.0, -1.0, -2.0], [1.0, 1.0, 2.0], filter_alpha=0.5)
     np.testing.assert_allclose(bridge.filter([1.0, 0.0, 1.0]), [1.0, 0.0, 1.0])
     np.testing.assert_allclose(bridge.filter([-1.0, 0.0, -1.0]), [0.0, 0.0, 0.0])
+
+
+def test_sensor_stream_summary_tracks_type_and_interarrival_fields():
+    slot = Latest(message_type="unitree_go.msg.WirelessController")
+    summary = slot.summary()
+    assert summary["message_type"] == "unitree_go.msg.WirelessController"
+    assert summary["gap_count"] == 0
+    assert summary["stale_count"] == 0
+
+
+def test_wireless_diagnostics_reads_nested_fields_without_ros_writes():
+    class FakeWireless:
+        __slots__ = ("keys", "lx", "nested")
+
+        def __init__(self):
+            self.keys = 3
+            self.lx = 0.25
+            self.nested = {"ignored": True}
+
+    value = _ros_value(FakeWireless())
+    assert value["keys"] == 3
+    assert value["lx"] == 0.25
+
+
+def test_diagnostics_source_has_no_ros_write_calls():
+    source = Path("deploy/go2_onboard/diagnostics.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    called_attributes = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "create_publisher" not in called_attributes
+    assert "publish" not in called_attributes
+    assert "send_low_level" not in called_attributes
 
 
 def test_shadow_runtime_has_no_ros_write_calls():
