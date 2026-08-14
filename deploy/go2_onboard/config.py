@@ -11,6 +11,9 @@ class RuntimeConfig:
     lidar_topic: str = "/utlidar/cloud_base"
     odom_topic: str = "/utlidar/robot_odom"
     wireless_topic: str = "/wirelesscontroller"
+    goal_topic: str = "/sea_nav/goal2d"
+    goal_frame: str = "odom"
+    base_frame: str = "base_link"
     device: str = "cpu"
     control_hz: float = 50.0
     max_sensor_age: float = 0.25
@@ -19,6 +22,7 @@ class RuntimeConfig:
     max_nav_action: float = 3.0
     command_bounds_min: List[float] = field(default_factory=lambda: [-1.0, -1.0, -2.0])
     command_bounds_max: List[float] = field(default_factory=lambda: [1.0, 1.0, 2.0])
+    command_filter_alpha: float = 1.0
     ray_count: int = 41
     ray_min_distance: float = 0.1
     ray_max_distance: float = 5.0
