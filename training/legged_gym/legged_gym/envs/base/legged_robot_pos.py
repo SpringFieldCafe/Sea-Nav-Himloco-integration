@@ -58,6 +58,13 @@ class LeggedRobotPos(LeggedRobot):
 
     def _init_buffers(self):
         super()._init_buffers()
+        self.last_reset_reason = {
+            "timeout": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "termination_contact": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "goal": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "fall": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "other": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+        }
         # Additionally initialize timer_left
         self.obs_history_buf = torch.zeros(
                 self.num_envs, self.cfg.env.his_len, self.cfg.env.num_obs_one_step, device=self.device, dtype=torch.float)  
@@ -221,6 +228,13 @@ class LeggedRobotPos(LeggedRobot):
         self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device), (self.num_envs/self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
         self.max_terrain_level = self.cfg.terrain.num_rows
         self.ori_z = torch.zeros(self.num_envs, 1, device=self.device)
+
+        if self.cfg.terrain.mesh_type == "plane":
+            # A true plane has no Terrain object or curriculum room. Keep the
+            # single environment at the world origin for matched-state tests.
+            self.env_origins.zero_()
+            self.position_targets.zero_()
+            return
         
         for i in range(self.num_envs):
             row = int(self.terrain_levels[i])
@@ -453,6 +467,15 @@ class LeggedRobotPos(LeggedRobot):
         Returns:
             [type]: [description]
         """
+        if self.cfg.terrain.mesh_type == "plane":
+            # The matched-state smoke test has no heightfield. A flat plane
+            # contributes no obstacle rays and should not access Terrain APIs.
+            self.measured_heights = torch.zeros(
+                self.num_envs, self.len_x, self.len_y, device=self.device
+            )
+            self.rays.fill_(self.cfg.sensors.ray2d.max_dist)
+            return
+
         if not hasattr(self.terrain, 'height_points'):
             self.height_points = self._init_height_points()
             
@@ -591,6 +614,14 @@ class LeggedRobotPos(LeggedRobot):
         self.reset_buf |= self.stand_still_flag
         self.reset_buf |= self.time_out_buf
         self.reset_buf |= self.fall_down
+
+        self.last_reset_reason["timeout"] = self.time_out_buf.clone()
+        self.last_reset_reason["termination_contact"] = self.terminate_buf.clone()
+        self.last_reset_reason["goal"] = self.goal_reached_flag.clone()
+        self.last_reset_reason["fall"] = self.fall_down.clone()
+        self.last_reset_reason["other"] = self.reset_buf & ~(
+            self.time_out_buf | self.terminate_buf | self.goal_reached_flag | self.fall_down
+        )
 
     def compute_reward(self):
         """ Compute rewards

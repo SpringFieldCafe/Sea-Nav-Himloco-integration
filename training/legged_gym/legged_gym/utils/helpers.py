@@ -193,6 +193,10 @@ def get_args():
         {"name": "--smoke_pre_roll", "type": float, "default": 0.0, "help": "Fixed-command smoke pre-roll in seconds."},
         {"name": "--smoke_command_filter_alpha", "type": float, "default": 1.0, "help": "Fixed-command smoke command filter alpha."},
         {"name": "--contract_log", "type": str, "default": "", "help": "Optional JSONL log for HIMLoco contract diagnostics."},
+        {"name": "--matched_state_export", "type": str, "default": "", "help": "Export one matched Isaac state and a fixed action sequence."},
+        {"name": "--matched_state_step", "type": int, "default": 150, "help": "Smoke-test step used as matched-state start."},
+        {"name": "--matched_state_steps", "type": int, "default": 50, "help": "Number of fixed 20ms actions to export."},
+        {"name": "--matched_flat", "action": "store_true", "default": False, "help": "Use a true Isaac Gym plane for matched-state tests."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(

@@ -55,6 +55,22 @@ def _roll_pitch_from_quat(quat):
     pitch = torch.asin(pitch_arg)
     return roll, pitch
 
+
+def _isaac_snapshot(env, backend):
+    """Serialize the pre-step state in HIMLoco policy joint order."""
+    q = env.dof_pos[:, backend.policy_to_sim_device]
+    dq = env.dof_vel[:, backend.policy_to_sim_device]
+    root = env.root_states[0].detach().cpu().numpy()
+    quat_xyzw = root[3:7]
+    return {
+        "root_position": root[:3].tolist(),
+        "root_quaternion_xyzw": quat_xyzw.tolist(),
+        "root_linear_velocity_world": root[7:10].tolist(),
+        "root_angular_velocity_world": root[10:13].tolist(),
+        "joint_position_policy_order": q[0].detach().cpu().numpy().tolist(),
+        "joint_velocity_policy_order": dq[0].detach().cpu().numpy().tolist(),
+    }
+
     
 def play(args):
     if args.navigation_speed_scale <= 0.0:
@@ -66,6 +82,18 @@ def play(args):
     
     env_cfg.terrain.terrain_types = ['hard_room']  
     env_cfg.terrain.terrain_proportions = [1.0]
+    if getattr(args, "matched_flat", False):
+        env_cfg.terrain.mesh_type = "plane"
+        env_cfg.terrain.curriculum = False
+        env_cfg.terrain.measure_heights = False
+        env_cfg.domain_rand.randomize_friction = False
+        env_cfg.domain_rand.push_robots = False
+        print(
+            "[matched-state] Isaac Gym ground=plane, "
+            f"static_friction={env_cfg.terrain.static_friction}, "
+            f"dynamic_friction={env_cfg.terrain.dynamic_friction}, "
+            f"restitution={env_cfg.terrain.restitution}"
+        )
     env_cfg.asset.file = '{LEGGED_GYM_ROOT_DIR}/resources/go2_description/urdf/go2_description.urdf'
     env_cfg.replay.enable_collision_replay = False
     
@@ -99,6 +127,9 @@ def play(args):
         env_cfg.commands.heading_command = False
         env_cfg.commands.alpha = 1.0
         env_cfg.domain_rand.push_robots = False
+        env_cfg.env.goal_reached_time = 1000000
+        env_cfg.env.stay_time = 1000000
+        env_cfg.env.episode_length_s = max(float(env_cfg.env.episode_length_s), 120.0)
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -159,6 +190,9 @@ def play(args):
     max_roll = 0.0
     max_pitch = 0.0
     reset_count = 0
+    matched_export = None
+    matched_actions = []
+    matched_posts = []
     contract_handle = open(args.contract_log, "w", encoding="utf-8") if args.contract_log else None
     target_command = torch.tensor(args.smoke_command, device=env.device, dtype=torch.float32).unsqueeze(0)
     target_command = target_command.repeat(env.num_envs, 1)
@@ -171,6 +205,25 @@ def play(args):
 
     with torch.inference_mode():
         for i in range(max_steps):
+            matched_backend = env.locomotion_backend if fixed_command_test else None
+            capture_matched = bool(
+                fixed_command_test and args.matched_state_export and
+                i == int(args.matched_state_step)
+            )
+            if capture_matched:
+                matched_export = {
+                    "schema": "matched_himloco_state_v1",
+                    "policy_path": os.path.abspath(args.himloco_policy),
+                    "step": i,
+                    "control_dt": float(env.dt),
+                    "decimation": int(env.cfg.control.decimation),
+                    "policy_joint_order": list(matched_backend.POLICY_JOINT_NAMES),
+                    "initial_state": _isaac_snapshot(env, matched_backend),
+                    "observation": None,
+                    "previous_action": None,
+                    "actions": [],
+                    "post_states": [],
+                }
             # Step the environment
             if fixed_command_test:
                 if i * float(env.dt) < float(args.smoke_pre_roll):
@@ -184,6 +237,19 @@ def play(args):
                 actions[:, 0] *= args.navigation_speed_scale
             obs, _, rews, dones, infos = env.step(actions)
             roll, pitch = _roll_pitch_from_quat(env.base_quat)
+            if matched_export is not None and len(matched_actions) < int(args.matched_state_steps):
+                backend = env.locomotion_backend
+                if matched_export["observation"] is None:
+                    matched_export["observation"] = tensor_row(backend.last_observation) if 'tensor_row' in locals() else backend.last_observation[0].detach().cpu().numpy().tolist()
+                    matched_export["previous_action"] = backend.last_observation[0, 33:45].detach().cpu().numpy().tolist()
+                matched_actions.append(backend.last_policy_action[0].detach().cpu().numpy().tolist())
+                matched_posts.append(_isaac_snapshot(env, backend))
+                matched_export["actions"] = matched_actions
+                matched_export["post_states"] = matched_posts
+                if len(matched_actions) == int(args.matched_state_steps):
+                    with open(args.matched_state_export, "w", encoding="utf-8") as handle:
+                        json.dump(matched_export, handle, indent=2)
+                    print(f"Wrote matched Isaac state export: {args.matched_state_export}")
             if contract_handle is not None and fixed_command_test:
                 backend = env.locomotion_backend
                 def tensor_row(value):
@@ -204,17 +270,17 @@ def play(args):
                     "policy_action": tensor_row(backend.last_policy_action),
                     "target_position": tensor_row(q_target.unsqueeze(0)),
                     "torque": tensor_row(env.torques),
-                    "base_ang_vel": tensor_row(env.base_ang_vel),
+                    "base_ang_vel": tensor_row(backend.last_raw_angular_velocity),
                     "base_ang_vel_raw": tensor_row(backend.last_raw_angular_velocity),
                     "base_ang_vel_scale": float(backend.contract.angular_velocity_scale),
                     "base_ang_vel_observation": tensor_row(backend.last_scaled_angular_velocity),
-                    "projected_gravity": tensor_row(env.projected_gravity),
+                    "projected_gravity": tensor_row(backend.last_raw_gravity),
                     "projected_gravity_raw": tensor_row(backend.last_raw_gravity),
-                    "dof_pos": tensor_row(env.dof_pos),
+                    "dof_pos": tensor_row(backend.last_raw_dof_position),
                     "dof_pos_raw": tensor_row(backend.last_raw_dof_position),
                     "dof_pos_scale": float(backend.contract.dof_position_scale),
                     "dof_pos_observation": tensor_row(backend.last_scaled_dof_position),
-                    "dof_vel": tensor_row(env.dof_vel),
+                    "dof_vel": tensor_row(backend.last_raw_dof_velocity),
                     "dof_vel_raw": tensor_row(backend.last_raw_dof_velocity),
                     "dof_vel_scale": float(backend.contract.dof_velocity_scale),
                     "dof_vel_observation": tensor_row(backend.last_scaled_dof_velocity),
@@ -222,12 +288,23 @@ def play(args):
                     "roll": float(roll[0].item()),
                     "pitch": float(pitch[0].item()),
                     "done": bool(dones[0].item()),
+                    "ground": {
+                        "type": "plane" if getattr(args, "matched_flat", False) else "configured",
+                        "static_friction": float(env.cfg.terrain.static_friction),
+                        "dynamic_friction": float(env.cfg.terrain.dynamic_friction),
+                        "restitution": float(env.cfg.terrain.restitution),
+                    },
+                    "control_contract": {
+                        "action_scale": float(backend.contract.action_scale),
+                        "hip_reduction": 1.0,
+                        "p_gain": float(backend.contract.p_gain),
+                        "d_gain": float(backend.contract.d_gain),
+                        "torque_limits": env.torque_limits[0].detach().cpu().numpy().tolist(),
+                        "joint_order": list(backend.POLICY_JOINT_NAMES),
+                    },
                     "reset_reason": {
-                        "timeout": bool(getattr(env, "time_out_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
-                        "termination_contact": bool(getattr(env, "terminate_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
-                        "goal": bool(getattr(env, "goal_reached_flag", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
-                        "fall": bool(getattr(env, "fall_down", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
-                        "other": bool(dones[0].item()) and not bool(getattr(env, "time_out_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()) and not bool(getattr(env, "terminate_buf", torch.zeros(1, dtype=torch.bool, device=env.device))[0].item()),
+                        name: bool(values[0].item())
+                        for name, values in backend.env.last_reset_reason.items()
                     },
                 }
                 contract_handle.write(json.dumps(row) + "\n")
