@@ -63,7 +63,13 @@ class SafetySupervisor:
 def _is_finite(value) -> bool:
     if value is None:
         return True
+    if isinstance(value, dict):
+        return all(_is_finite(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_is_finite(item) for item in value)
+    if isinstance(value, (str, bytes, bool)):
+        return True
     try:
-        return bool(np.isfinite(np.asarray(value)).all())
+        return bool(np.isfinite(np.asarray(value, dtype=np.float64)).all())
     except (TypeError, ValueError):
         return True

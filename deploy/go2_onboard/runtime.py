@@ -5,17 +5,12 @@ import math
 import time
 
 import numpy as np
-import torch
 
 from .command_bridge import ReadOnlyCommandBridge
 from .config import RuntimeConfig
 from .goal import Goal2D, GoalManager
-from .himloco_observation import HIMLocoObservation
 from .joint_mapping import make_policy_to_motor
-from .lidar_ray_adapter import LidarRayAdapter
 from .logger import JsonlLogger
-from .model_loader import infer, load_himloco_policy, load_navigation_policy
-from .navigation_observation import NavigationObservation
 from .ros_state_reader import RosStateReader
 from .safety_supervisor import RuntimeState, SafetySupervisor
 
@@ -53,7 +48,7 @@ class OnboardRuntime:
 
     def __init__(self, args):
         self.args = args
-        self.device = torch.device(args.device)
+        self.device = None
         self.config = RuntimeConfig(
             navigation_policy=args.navigation_policy or "",
             navigation_metadata=args.navigation_metadata,
@@ -79,7 +74,7 @@ class OnboardRuntime:
             self.config.command_filter_alpha,
         )
         self.rate = 1.0 / args.control_hz
-        self.last_command = torch.zeros((1, 3), dtype=torch.float32, device=self.device)
+        self.last_command = None
         self.last_report = 0.0
         self.started = time.monotonic()
         self.goal_topic_enabled = bool(args.goal_topic)
@@ -95,6 +90,22 @@ class OnboardRuntime:
             self._load_policies()
 
     def _load_policies(self):
+        try:
+            import torch
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "shadow mode requires torch; sensor mode and diagnostics do not"
+            ) from exc
+
+        from .himloco_observation import HIMLocoObservation
+        from .lidar_ray_adapter import LidarRayAdapter
+        from .model_loader import infer, load_himloco_policy, load_navigation_policy
+        from .navigation_observation import NavigationObservation
+
+        self._torch = torch
+        self._infer = infer
+        self.device = torch.device(self.args.device)
+        self.last_command = torch.zeros((1, 3), dtype=torch.float32, device=self.device)
         self.nav_policy = load_navigation_policy(self.args.navigation_policy, self.args.navigation_metadata, self.device)
         self.him_policy = load_himloco_policy(self.args.himloco_policy, self.device)
         print(f"[shadow] SEA-Nav policy={self.nav_policy.path} sha256={self.nav_policy.sha256}")
@@ -137,7 +148,8 @@ class OnboardRuntime:
         report = self.safety.evaluate(health["sensor_ages"], mode="sensor", values=health["finite_values"],
                                       deadline_miss=deadline_miss, wireless_emergency=health["wireless_emergency"])
         record = {"mode": "sensor", "timestamp": time.time(), "runtime_state": report.state.value,
-                  "fault_reason": report.fault_reason, "sensor": health, "loop_latency_ms": _ms(cycle_start)}
+                  "fault_reason": report.fault_reason, "sensor": _health_for_log(health),
+                  "loop_latency_ms": _ms(cycle_start), "lowcmd_sent": False}
         if self._should_log() or report.state not in (RuntimeState.SENSOR, RuntimeState.SENSOR_WAIT):
             self.logger.write(record)
 
@@ -156,6 +168,7 @@ class OnboardRuntime:
             goal = self.goal_manager.relative_xy(
                 odom.position[:2], quat_to_yaw(low.quaternion), odom.frame_id, self.args.base_frame,
             )
+            torch = self._torch
             gravity = torch.from_numpy(quat_to_gravity(low.quaternion)).reshape(1, 3).to(self.device)
             gyro = torch.from_numpy(low.gyro).reshape(1, 3).to(self.device)
             q_motor = torch.from_numpy(low.q_motor).reshape(1, 12).to(self.device)
@@ -170,7 +183,7 @@ class OnboardRuntime:
             nav_input = self.nav_obs.build(gravity, self.last_command, linear_velocity,
                                            angular_velocity, rays, goal_xy)
             nav_start = time.perf_counter()
-            nav_raw = infer(self.nav_policy, nav_input, 3)
+            nav_raw = self._infer(self.nav_policy, nav_input, 3)
             nav_latency_ms = _ms(nav_start)
             nav_command = self.command_bridge.validate(nav_raw[0].detach().cpu().numpy())
             filtered_command = self.command_bridge.filter(nav_raw[0].detach().cpu().numpy())
@@ -179,7 +192,7 @@ class OnboardRuntime:
                                            q_policy - torch.from_numpy(DEFAULT_JOINT_ANGLES).reshape(1, 12).to(self.device),
                                            dq_policy)
             him_start = time.perf_counter()
-            him_action = infer(self.him_policy, him_input, 12)
+            him_action = self._infer(self.him_policy, him_input, 12)
             him_latency_ms = _ms(him_start)
             self.him_obs.record_action(him_action)
             self.last_command = nav_command_t.detach()
@@ -199,7 +212,7 @@ class OnboardRuntime:
                 "sea_inference_latency_ms": nav_latency_ms,
                 "him_observation_shape": list(him_input.shape), "him_observation_min": float(him_input.min()),
                 "him_observation_max": float(him_input.max()), "him_action": him_action[0].detach().cpu().tolist(),
-                "him_inference_latency_ms": him_latency_ms, "sensor": health,
+                "him_inference_latency_ms": him_latency_ms, "sensor": _health_for_log(health),
                 "loop_latency_ms": _ms(cycle_start), "deadline_miss": deadline_miss,
                 "lowcmd_sent": False,
             }
@@ -209,13 +222,14 @@ class OnboardRuntime:
             report = self.safety.evaluate(health["ages"], values=(), mode="shadow",
                                           wireless_emergency=health["wireless_emergency"])
             self.logger.write({"mode": "shadow", "timestamp": time.time(), "runtime_state": RuntimeState.INVALID_DATA.value,
-                               "fault_reason": str(exc), "sensor": health, "lowcmd_sent": False})
+                               "fault_reason": str(exc), "sensor": _health_for_log(health), "lowcmd_sent": False})
 
     def _log_shadow_wait(self, health, report, cycle_start):
         if self._should_log():
             self.logger.write({"mode": "shadow", "timestamp": time.time(), "runtime_state": RuntimeState.SENSOR_WAIT.value,
                                "fault_reason": report.fault_reason or "waiting_for_lowstate_lidar_odom_goal",
-                               "sensor": health, "loop_latency_ms": _ms(cycle_start), "lowcmd_sent": False})
+                               "sensor": _health_for_log(health), "loop_latency_ms": _ms(cycle_start),
+                               "lowcmd_sent": False})
 
     def _should_log(self):
         now = time.monotonic()
@@ -227,6 +241,11 @@ class OnboardRuntime:
 
 def _ms(start):
     return (time.perf_counter() - start) * 1000.0
+
+
+def _health_for_log(health):
+    """Keep JSONL bounded; raw numeric values remain available to safety checks."""
+    return {key: value for key, value in health.items() if key != "finite_values"}
 
 
 def build_parser():
@@ -260,8 +279,13 @@ def main(argv=None):
         raise SystemExit("shadow mode requires --navigation-policy and --himloco-policy")
     if (args.goal_x is None) != (args.goal_y is None):
         raise SystemExit("provide both --goal-x and --goal-y, or neither")
-    if args.device.startswith("cuda") and not torch.cuda.is_available():
-        raise SystemExit("CUDA requested but unavailable")
+    if args.device.startswith("cuda"):
+        try:
+            import torch
+        except ModuleNotFoundError as exc:
+            raise SystemExit("CUDA/shadow mode requires torch") from exc
+        if not torch.cuda.is_available():
+            raise SystemExit("CUDA requested but unavailable")
     OnboardRuntime(args).run()
 
 

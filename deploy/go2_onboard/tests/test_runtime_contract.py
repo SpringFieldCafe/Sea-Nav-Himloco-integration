@@ -15,7 +15,8 @@ from deploy.go2_onboard.model_loader import load_himloco_policy, load_navigation
 from deploy.go2_onboard.navigation_observation import NavigationObservation
 from deploy.go2_onboard.diagnostics import _ros_value
 from deploy.go2_onboard.ros_state_reader import Latest
-from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor
+from deploy.go2_onboard.runtime import _health_for_log
+from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor, _is_finite
 
 
 def test_goal_transform_global_to_body_and_body_goal():
@@ -84,6 +85,12 @@ def test_stale_and_nan_safety_states():
     assert invalid.state == RuntimeState.INVALID_DATA
     emergency = safety.evaluate({"lowstate": 0.01}, values=[np.zeros(3)], wireless_emergency=True)
     assert emergency.state == RuntimeState.EMERGENCY_STOP
+
+
+def test_nested_finite_values_and_sensor_log_are_bounded():
+    assert _is_finite([np.zeros(3), {"q": np.ones(2)}])
+    assert not _is_finite([np.zeros(3), {"q": np.asarray([np.nan])}])
+    assert _health_for_log({"streams": {}, "finite_values": [np.zeros(1000)]}) == {"streams": {}}
 
 
 def test_shadow_command_bridge_has_no_write_path():

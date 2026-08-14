@@ -142,10 +142,15 @@ class RosStateReader:
 
     def _lidar_callback(self, msg):
         from sensor_msgs_py import point_cloud2
-        raw = np.asarray(
-            list(point_cloud2.read_points(msg, field_names=("x", "y", "z"), skip_nans=False)),
-            dtype=np.float32,
-        ).reshape((-1, 3))
+        points = np.asarray(
+            list(point_cloud2.read_points(msg, field_names=("x", "y", "z"), skip_nans=False))
+        )
+        if points.dtype.names:
+            raw = np.column_stack((points["x"], points["y"], points["z"])).astype(
+                np.float32, copy=False
+            )
+        else:
+            raw = np.asarray(points, dtype=np.float32).reshape((-1, 3))
         finite = np.isfinite(raw).all(axis=1)
         points = raw[finite]
         self._store(self.lidar, points, msg)

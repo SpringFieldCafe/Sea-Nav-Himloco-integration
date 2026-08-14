@@ -89,9 +89,9 @@ class ReadOnlyDiagnostics:
         self.reader = RosStateReader(Topics(args), max_sensor_age=args.max_sensor_age)
         self.logger = JsonlLogger(args.log)
         self.goal_manager = GoalManager()
-        from .lidar_ray_adapter import LidarRayAdapter
-        self.ray_adapter = LidarRayAdapter(
-            "cpu", ray_count=41, min_distance=0.1, max_distance=5.0,
+        from .lidar_ray_adapter import NumpyLidarRayAdapter
+        self.ray_adapter = NumpyLidarRayAdapter(
+            ray_count=41, min_distance=0.1, max_distance=5.0,
             angle_min=-2.0 * np.pi / 3.0, angle_max=2.0 * np.pi / 3.0,
             min_z=-0.25, max_z=1.0,
         )
@@ -130,7 +130,7 @@ class ReadOnlyDiagnostics:
         lidar_record = dict(health["streams"]["lidar"])
         if lidar is not None:
             rays = self.ray_adapter.project(lidar)[0]
-            log2_rays = np.log2(np.clip(rays.detach().cpu().numpy(), 0.1, 5.0))
+            log2_rays = np.log2(np.clip(rays, 0.1, 5.0))
             lidar_record.update({
                 "points_used_by_adapter": int(lidar.shape[0]),
                 "rays_41": rays.tolist(),
