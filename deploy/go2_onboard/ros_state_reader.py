@@ -6,6 +6,8 @@ import threading
 
 import numpy as np
 
+from .lidar_ray_adapter import LidarRayCache
+
 
 @dataclass
 class Latest:
@@ -101,6 +103,7 @@ class RosStateReader:
 
         self.lowstate = Latest()
         self.lidar = Latest()
+        self.lidar_cache = LidarRayCache()
         self.odom = Latest()
         self.wireless = Latest()
         self.goal = Latest()
@@ -160,6 +163,12 @@ class RosStateReader:
             raw = np.asarray(points, dtype=np.float32).reshape((-1, 3))
         finite = np.isfinite(raw).all(axis=1)
         points = raw[finite]
+        received_at = time.monotonic()
+        self.lidar_cache.update(
+            points,
+            received_at=received_at,
+            source_timestamp=_message_timestamp(msg),
+        )
         with self.lock:
             self._store(self.lidar, points, msg)
             self.lidar.point_count = int(raw.shape[0])

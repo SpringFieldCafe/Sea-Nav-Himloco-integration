@@ -11,7 +11,6 @@ import numpy as np
 
 from .goal import Goal2D, GoalManager
 from .ipc_schema import encode_packet, make_packet
-from .lidar_ray_adapter import NumpyLidarRayAdapter
 from .ros_state_reader import RosStateReader
 from .runtime import Topics, quat_to_gravity, quat_to_yaw
 from .timing import NumericStats, RateStats
@@ -46,7 +45,6 @@ class SensorBridge:
         self.goal_manager = GoalManager()
         if args.goal_x is not None and args.goal_y is not None:
             self.goal_manager.update(Goal2D(args.goal_frame, args.goal_x, args.goal_y, time.time()))
-        self.rays = NumpyLidarRayAdapter()
         self.sequence = 0
 
     def snapshot(self):
@@ -76,9 +74,10 @@ class SensorBridge:
             joint_vel = low.dq_motor
             gyro = low.gyro
         gravity = quat_to_gravity(low_quaternion)
-        lidar_start = time.perf_counter()
-        rays = self.rays.project(lidar) if lidar is not None else np.full((1, 41), 5.0, dtype=np.float32)
-        lidar_processing_ms = (time.perf_counter() - lidar_start) * 1000.0
+        lidar_cache_start = time.perf_counter()
+        lidar_cache = self.reader.lidar_cache.snapshot()
+        rays = lidar_cache["rays"] if lidar is not None else np.full((41,), 5.0, dtype=np.float32)
+        lidar_cache_copy_ms = (time.perf_counter() - lidar_cache_start) * 1000.0
         if odom is None:
             linear = np.zeros(3, dtype=np.float32)
             odom_angular = np.zeros(3, dtype=np.float32)
@@ -106,7 +105,7 @@ class SensorBridge:
             projected_gravity=gravity,
             base_linear_velocity_body=linear,
             base_angular_velocity_body=gyro,
-            lidar_rays=rays[0],
+            lidar_rays=rays,
             goal_body=goal_body,
             sensor_age=ages,
             validity=valid,
@@ -114,7 +113,11 @@ class SensorBridge:
         self.sequence += 1
         return packet, health, {
             "snapshot_build_ms": (time.perf_counter() - snapshot_start) * 1000.0,
-            "lidar_processing_ms": lidar_processing_ms,
+            "lidar_processing_ms": 0.0,
+            "lidar_cache_copy_ms": lidar_cache_copy_ms,
+            "lidar_callback_processing_ms": lidar_cache["processing_ms"],
+            "lidar_cache_processed_count": lidar_cache["processed_count"],
+            "lidar_cache_source_timestamp": lidar_cache["source_timestamp"],
         }
 
     def close(self):
@@ -180,6 +183,10 @@ def run(args):
                 "packet_rate_hz": rate_stats.current_rate_hz(),
                 "snapshot_build_ms": timing["snapshot_build_ms"],
                 "lidar_processing_ms": timing["lidar_processing_ms"],
+                "lidar_cache_copy_ms": timing["lidar_cache_copy_ms"],
+                "lidar_callback_processing_ms": timing["lidar_callback_processing_ms"],
+                "lidar_cache_processed_count": timing["lidar_cache_processed_count"],
+                "lidar_cache_source_timestamp": timing["lidar_cache_source_timestamp"],
                 "ipc_encode_ms": encode_ms,
                 "ipc_send_ms": send_ms,
                 "log_write_ms": last_log_write_ms,

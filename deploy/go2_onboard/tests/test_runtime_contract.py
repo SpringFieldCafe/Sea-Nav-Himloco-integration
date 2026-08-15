@@ -18,7 +18,7 @@ from deploy.go2_onboard.goal import Goal2D, GoalManager
 from deploy.go2_onboard.himloco_observation import HIMLocoObservation
 from deploy.go2_onboard.ipc_schema import decode_packet, encode_packet, make_packet
 from deploy.go2_onboard.joint_mapping import make_motor_to_policy, make_policy_to_motor
-from deploy.go2_onboard.lidar_ray_adapter import LidarRayAdapter
+from deploy.go2_onboard.lidar_ray_adapter import LidarRayAdapter, LidarRayCache, NumpyLidarRayAdapter
 from deploy.go2_onboard.model_loader import load_himloco_policy, load_navigation_policy
 from deploy.go2_onboard.navigation_observation import NavigationObservation
 from deploy.go2_onboard.diagnostics import _ros_value
@@ -47,6 +47,46 @@ def test_lidar_preprocessing_is_41_rays_and_clipped():
     assert float(rays.min()) >= 0.1
     assert float(rays.max()) <= 5.0
     assert float(rays[0, 20]) == pytest.approx(0.2)
+
+
+def test_lidar_cache_processes_each_message_once_and_reuses_snapshot():
+    class CountingAdapter(NumpyLidarRayAdapter):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def project(self, points):
+            self.calls += 1
+            return super().project(points)
+
+    adapter = CountingAdapter()
+    cache = LidarRayCache(adapter)
+    points = np.asarray([[0.2, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32)
+    expected = adapter.project(points)[0]
+    adapter.calls = 0
+    cache.update(points, received_at=12.5, source_timestamp=99.0)
+    first = cache.snapshot()
+    second = cache.snapshot()
+    assert adapter.calls == 1
+    np.testing.assert_allclose(first["rays"], expected)
+    np.testing.assert_allclose(second["rays"], expected)
+    assert first["processed_count"] == 1
+    assert second["processed_count"] == 1
+    assert first["received_at"] == pytest.approx(12.5)
+    assert second["source_timestamp"] == pytest.approx(99.0)
+
+
+def test_lidar_cache_new_message_updates_timestamp_and_projection():
+    adapter = NumpyLidarRayAdapter()
+    cache = LidarRayCache(adapter)
+    cache.update(np.asarray([[0.5, 0.0, 0.0]], dtype=np.float32), received_at=1.0, source_timestamp=10.0)
+    before = cache.snapshot()
+    cache.update(np.asarray([[1.5, 0.0, 0.0]], dtype=np.float32), received_at=2.0, source_timestamp=11.0)
+    after = cache.snapshot()
+    assert after["processed_count"] == before["processed_count"] + 1
+    assert after["received_at"] == pytest.approx(2.0)
+    assert after["source_timestamp"] == pytest.approx(11.0)
+    assert after["rays"][20] == pytest.approx(1.5)
 
 
 def test_sea_nav_observation_shape_order_and_history():
@@ -189,6 +229,8 @@ def test_sensor_bridge_uses_continuous_executor_not_one_callback_per_packet():
     source = Path("deploy/go2_onboard/sensor_bridge.py").read_text(encoding="utf-8")
     assert "start_background_spin" in source
     assert "reader.spin_once" not in source
+    assert "lidar_cache.snapshot()" in source
+    assert ".project(" not in source
     reader_source = Path("deploy/go2_onboard/ros_state_reader.py").read_text(encoding="utf-8")
     assert "SingleThreadedExecutor" in reader_source
     assert "threading.RLock()" in reader_source

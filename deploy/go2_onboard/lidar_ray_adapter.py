@@ -1,4 +1,6 @@
 import math
+import threading
+import time
 
 import numpy as np
 
@@ -91,3 +93,44 @@ class NumpyLidarRayAdapter:
                 if selected.size:
                     rays[i] = selected.min()
         return np.clip(rays, self.min_distance, self.max_distance)[None, :]
+
+
+class LidarRayCache:
+    """Cache one projected LiDAR frame for the fixed-rate sensor snapshot.
+
+    Point-cloud projection is deliberately performed by ``update`` only.  A
+    snapshot consumer may read the same result many times without re-running
+    the projection or changing its source timestamp.
+    """
+
+    def __init__(self, adapter=None):
+        self.adapter = adapter or NumpyLidarRayAdapter()
+        self._lock = threading.RLock()
+        self._rays = np.full((41,), self.adapter.max_distance, dtype=np.float32)
+        self._received_at = 0.0
+        self._source_timestamp = 0.0
+        self._processed_count = 0
+        self._last_processing_ms = 0.0
+
+    def update(self, points, received_at=None, source_timestamp=0.0):
+        start = time.perf_counter()
+        rays = np.asarray(self.adapter.project(points), dtype=np.float32).reshape(-1)
+        if rays.shape != (41,) or not np.isfinite(rays).all():
+            raise ValueError(f"cached LiDAR rays must be finite (41,), got {rays.shape}")
+        processing_ms = (time.perf_counter() - start) * 1000.0
+        with self._lock:
+            self._rays = rays.copy()
+            self._received_at = time.monotonic() if received_at is None else float(received_at)
+            self._source_timestamp = float(source_timestamp)
+            self._processed_count += 1
+            self._last_processing_ms = processing_ms
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "rays": self._rays.copy(),
+                "received_at": self._received_at,
+                "source_timestamp": self._source_timestamp,
+                "processed_count": self._processed_count,
+                "processing_ms": self._last_processing_ms,
+            }
