@@ -26,6 +26,11 @@ DEFAULT_FRESHNESS = {
 }
 
 
+def duration_expired(started, duration, now):
+    """Apply bridge duration only after the shadow worker has connected."""
+    return started is not None and duration > 0.0 and now - started >= duration
+
+
 class SensorBridge:
     def __init__(self, args):
         self.args = args
@@ -118,7 +123,7 @@ def run(args):
     server.settimeout(0.5)
     bridge = SensorBridge(args)
     bridge.reader.start_background_spin()
-    started = time.monotonic()
+    started = None
     if args.log:
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
     log = open(args.log, "a", encoding="utf-8") if args.log else None
@@ -126,11 +131,12 @@ def run(args):
     print(f"[sensor_bridge] listening socket={args.socket}")
     print("[safety] ROS sensor reader only; no Torch, LowCmd, SportClient, or write path")
     try:
-        while args.duration <= 0 or time.monotonic() - started < args.duration:
+        while not duration_expired(started, args.duration, time.monotonic()):
             if connection is None:
                 try:
                     connection, _ = server.accept()
                     connection.settimeout(1.0)
+                    started = time.monotonic()
                     print("[sensor_bridge] shadow worker connected")
                 except socket.timeout:
                     continue

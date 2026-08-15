@@ -25,6 +25,7 @@ from deploy.go2_onboard.diagnostics import _ros_value
 from deploy.go2_onboard.ros_state_reader import Latest, is_fresh
 from deploy.go2_onboard.runtime import _health_for_log
 from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor, _is_finite
+from deploy.go2_onboard.sensor_bridge import duration_expired
 
 
 def test_goal_transform_global_to_body_and_body_goal():
@@ -190,6 +191,18 @@ def test_sensor_bridge_uses_continuous_executor_not_one_callback_per_packet():
     reader_source = Path("deploy/go2_onboard/ros_state_reader.py").read_text(encoding="utf-8")
     assert "SingleThreadedExecutor" in reader_source
     assert "threading.RLock()" in reader_source
+
+
+def test_sensor_bridge_duration_starts_after_worker_connection():
+    assert not duration_expired(None, 15.0, 100.0)
+    assert not duration_expired(100.0, 15.0, 114.999)
+    assert duration_expired(100.0, 15.0, 115.0)
+    assert not duration_expired(100.0, 0.0, 100000.0)
+
+    source = Path("deploy/go2_onboard/sensor_bridge.py").read_text(encoding="utf-8")
+    assert "started = None" in source
+    assert "started = time.monotonic()" in source
+    assert "connection, _ = server.accept()" in source
 
 
 def test_split_shadow_ipc_packet_is_one_way_and_shape_checked():
