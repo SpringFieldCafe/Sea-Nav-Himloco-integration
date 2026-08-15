@@ -22,7 +22,7 @@ from deploy.go2_onboard.lidar_ray_adapter import LidarRayAdapter
 from deploy.go2_onboard.model_loader import load_himloco_policy, load_navigation_policy
 from deploy.go2_onboard.navigation_observation import NavigationObservation
 from deploy.go2_onboard.diagnostics import _ros_value
-from deploy.go2_onboard.ros_state_reader import Latest
+from deploy.go2_onboard.ros_state_reader import Latest, is_fresh
 from deploy.go2_onboard.runtime import _health_for_log
 from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor, _is_finite
 
@@ -124,6 +124,13 @@ def test_sensor_stream_summary_tracks_type_and_interarrival_fields():
     assert summary["stale_count"] == 0
 
 
+def test_per_sensor_freshness_allows_nominal_lidar_period_but_not_timeout():
+    assert is_fresh(0.002, 0.10)  # high-rate LowState
+    assert is_fresh(0.072, 0.20)  # approximately one 13.8 Hz LiDAR period
+    assert not is_fresh(0.101, 0.10)
+    assert not is_fresh(0.201, 0.20)
+
+
 def test_wireless_diagnostics_reads_nested_fields_without_ros_writes():
     class FakeWireless:
         __slots__ = ("keys", "lx", "nested")
@@ -174,6 +181,15 @@ def test_shadow_runtime_has_no_ros_write_calls():
     assert "LowCmd" not in imported_names | imported_from_names
     assert "create_publisher" not in called_attributes
     assert "publish" not in called_attributes
+
+
+def test_sensor_bridge_uses_continuous_executor_not_one_callback_per_packet():
+    source = Path("deploy/go2_onboard/sensor_bridge.py").read_text(encoding="utf-8")
+    assert "start_background_spin" in source
+    assert "reader.spin_once" not in source
+    reader_source = Path("deploy/go2_onboard/ros_state_reader.py").read_text(encoding="utf-8")
+    assert "SingleThreadedExecutor" in reader_source
+    assert "threading.RLock()" in reader_source
 
 
 def test_split_shadow_ipc_packet_is_one_way_and_shape_checked():

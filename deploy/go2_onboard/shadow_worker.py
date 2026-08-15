@@ -30,6 +30,11 @@ def run(args):
     him_obs = HIMLocoObservation(device)
     bridge = ReadOnlyCommandBridge([-1.0, -1.0, -2.0], [1.0, 1.0, 2.0], args.command_filter_alpha)
     policy_to_motor = make_policy_to_motor()
+    freshness = {
+        "lowstate": args.lowstate_max_age,
+        "odom": args.odom_max_age,
+        "lidar": args.lidar_max_age,
+    }
     last_command = torch.zeros((1, 3), dtype=torch.float32, device=device)
     if args.log:
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +74,8 @@ def run(args):
                 last_packet_received = receive_time
                 loop_start = time.perf_counter()
                 record, last_command = process_packet(
-                    packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device, last_command
+                    packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device,
+                    last_command, freshness,
                 )
                 loop_latency_ms = (time.perf_counter() - loop_start) * 1000.0
                 record.update({
@@ -97,14 +103,16 @@ def run(args):
             log.close()
 
 
-def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device, last_command):
+def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device,
+                   last_command, freshness):
     required = packet["validity"]
     if not all(required.get(name, False) for name in ("lowstate", "lidar", "odom", "goal")):
         return ({"runtime_state": "STALE_SENSOR", "fault_reason": "invalid_or_missing_sensor", "lowcmd_sent": False}, last_command)
-    required_ages = ("lowstate", "lidar", "odom", "goal")
+    # A fixed command-line Goal2D has no ROS receive age; validity still gates it.
+    required_ages = ("lowstate", "lidar", "odom")
     if any(
         packet["sensor_age"].get(name) is None
-        or packet["sensor_age"].get(name) > 0.25
+        or packet["sensor_age"].get(name) > freshness[name]
         for name in required_ages
     ):
         return ({"runtime_state": "STALE_SENSOR", "fault_reason": "stale_sensor", "lowcmd_sent": False}, last_command)
@@ -158,6 +166,9 @@ def build_parser():
     parser.add_argument("--connect-timeout", type=float, default=10.0)
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda", "cuda:0"))
     parser.add_argument("--command-filter-alpha", type=float, default=0.15)
+    parser.add_argument("--lowstate-max-age", type=float, default=0.10)
+    parser.add_argument("--odom-max-age", type=float, default=0.10)
+    parser.add_argument("--lidar-max-age", type=float, default=0.20)
     parser.add_argument("--log", default="logs/go2_4d/shadow_worker.jsonl")
     parser.add_argument("--navigation-policy", default=DEFAULT_SEA)
     parser.add_argument("--navigation-metadata", default=DEFAULT_SEA_META)

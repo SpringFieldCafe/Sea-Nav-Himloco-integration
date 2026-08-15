@@ -17,12 +17,26 @@ from .runtime import Topics, quat_to_gravity, quat_to_yaw
 
 
 DEFAULT_SOCKET = "/tmp/sea_nav_shadow.sock"
+DEFAULT_FRESHNESS = {
+    "lowstate": 0.10,
+    "odom": 0.10,
+    "lidar": 0.20,
+    "wireless": 0.25,
+    "goal": 1.0,
+}
 
 
 class SensorBridge:
     def __init__(self, args):
         self.args = args
-        self.reader = RosStateReader(Topics(args), max_sensor_age=args.max_sensor_age)
+        self.freshness = dict(DEFAULT_FRESHNESS)
+        if args.max_sensor_age is not None:
+            self.freshness = {name: float(args.max_sensor_age) for name in self.freshness}
+        for name in ("lowstate", "odom", "lidar", "wireless", "goal"):
+            value = getattr(args, f"{name}_max_age")
+            if value is not None:
+                self.freshness[name] = float(value)
+        self.reader = RosStateReader(Topics(args), max_sensor_age=max(self.freshness.values()))
         self.goal_manager = GoalManager()
         if args.goal_x is not None and args.goal_y is not None:
             self.goal_manager.update(Goal2D(args.goal_frame, args.goal_x, args.goal_y, time.time()))
@@ -30,13 +44,14 @@ class SensorBridge:
         self.sequence = 0
 
     def snapshot(self):
-        if self.reader.goal.value is not None:
-            self.goal_manager.update(self.reader.goal.value)
-        health = self.reader.health(self.args.max_sensor_age)
-        low = self.reader.lowstate.value
-        lidar = self.reader.lidar.value
-        odom = self.reader.odom.value
-        goal = self.goal_manager.current
+        with self.reader.lock:
+            if self.reader.goal.value is not None:
+                self.goal_manager.update(self.reader.goal.value)
+            health = self.reader.health(sensor_max_ages=self.freshness)
+            low = self.reader.lowstate.value
+            lidar = self.reader.lidar.value
+            odom = self.reader.odom.value
+            goal = self.goal_manager.current
         valid = {
             "lowstate": low is not None,
             "lidar": lidar is not None,
@@ -102,6 +117,7 @@ def run(args):
     server.listen(1)
     server.settimeout(0.5)
     bridge = SensorBridge(args)
+    bridge.reader.start_background_spin()
     started = time.monotonic()
     if args.log:
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
@@ -117,10 +133,8 @@ def run(args):
                     connection.settimeout(1.0)
                     print("[sensor_bridge] shadow worker connected")
                 except socket.timeout:
-                    bridge.reader.spin_once(0.0)
                     continue
             cycle = time.perf_counter()
-            bridge.reader.spin_once(0.0)
             packet, health = bridge.snapshot()
             try:
                 connection.sendall(encode_packet(packet))
@@ -130,6 +144,7 @@ def run(args):
             record = {
                 "mode": "sensor_bridge", "timestamp": time.time(), "sequence": packet["sequence"],
                 "packet_validity": packet["validity"], "sensor_age": packet["sensor_age"],
+                "freshness_thresholds": health["sensor_thresholds"],
                 "packet_rate_hz": 1.0 / max(time.perf_counter() - cycle, 1e-6),
                 "ipc_latency_ms": (time.perf_counter() - cycle) * 1000.0,
                 "lowcmd_sent": False,
@@ -161,7 +176,13 @@ def build_parser():
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--duration", type=float, default=0.0)
     parser.add_argument("--control-hz", type=float, default=50.0)
-    parser.add_argument("--max-sensor-age", type=float, default=0.25)
+    parser.add_argument("--max-sensor-age", type=float, default=None,
+                        help="legacy override; prefer per-sensor freshness options")
+    parser.add_argument("--lowstate-max-age", type=float, default=None)
+    parser.add_argument("--odom-max-age", type=float, default=None)
+    parser.add_argument("--lidar-max-age", type=float, default=None)
+    parser.add_argument("--wireless-max-age", type=float, default=None)
+    parser.add_argument("--goal-max-age", type=float, default=None)
     parser.add_argument("--log", default="logs/go2_4d/sensor_bridge.jsonl")
     parser.add_argument("--lowstate-topic", default="/lowstate")
     parser.add_argument("--lidar-topic", default="/utlidar/cloud_base")

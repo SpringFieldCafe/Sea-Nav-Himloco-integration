@@ -2,6 +2,7 @@
 
 import time
 from dataclasses import dataclass
+import threading
 
 import numpy as np
 
@@ -82,6 +83,7 @@ class RosStateReader:
 
     def __init__(self, topics, max_sensor_age=0.25):
         import rclpy
+        from rclpy.executors import SingleThreadedExecutor
         from nav_msgs.msg import Odometry
         from sensor_msgs.msg import PointCloud2
         from unitree_go.msg import LowState, WirelessController
@@ -89,6 +91,9 @@ class RosStateReader:
 
         self._rclpy = rclpy
         self._owns_rclpy = False
+        self.lock = threading.RLock()
+        self._executor = None
+        self._spin_thread = None
         self.max_sensor_age = float(max_sensor_age)
         if not rclpy.ok():
             rclpy.init(args=None)
@@ -100,6 +105,7 @@ class RosStateReader:
         self.wireless = Latest()
         self.goal = Latest()
         self.node = rclpy.create_node("sea_nav_go2_shadow_runtime")
+        self._executor_type = SingleThreadedExecutor
         self.node.create_subscription(LowState, topics.lowstate, self._lowstate_callback, 10)
         self.node.create_subscription(PointCloud2, topics.lidar, self._lidar_callback, 10)
         self.node.create_subscription(Odometry, topics.odom, self._odom_callback, 10)
@@ -108,24 +114,25 @@ class RosStateReader:
             self.node.create_subscription(PointStamped, topics.goal, self._goal_callback, 10)
 
     def _store(self, slot, value, message=None):
-        now = time.monotonic()
-        if slot.received_at:
-            period = now - slot.received_at
-            if period > 0:
-                slot.last_period_s = period
-                slot.max_gap_s = max(slot.max_gap_s, period)
-                if period > self.max_sensor_age:
-                    slot.gap_count += 1
-                slot.frequency_hz = 1.0 / period
-        slot._previous_received_at = slot.received_at
-        slot.value = value
-        slot.received_at = now
-        slot.count += 1
-        slot.source_timestamp = _message_timestamp(message)
-        slot.frame_id = _message_frame_id(message)
-        slot.child_frame_id = str(getattr(message, "child_frame_id", "") or "")
-        if message is not None:
-            slot.message_type = f"{type(message).__module__}.{type(message).__name__}"
+        with self.lock:
+            now = time.monotonic()
+            if slot.received_at:
+                period = now - slot.received_at
+                if period > 0:
+                    slot.last_period_s = period
+                    slot.max_gap_s = max(slot.max_gap_s, period)
+                    if period > self.max_sensor_age:
+                        slot.gap_count += 1
+                    slot.frequency_hz = 1.0 / period
+            slot._previous_received_at = slot.received_at
+            slot.value = value
+            slot.received_at = now
+            slot.count += 1
+            slot.source_timestamp = _message_timestamp(message)
+            slot.frame_id = _message_frame_id(message)
+            slot.child_frame_id = str(getattr(message, "child_frame_id", "") or "")
+            if message is not None:
+                slot.message_type = f"{type(message).__module__}.{type(message).__name__}"
 
     def _lowstate_callback(self, msg):
         motors = getattr(msg, "motor_state", getattr(msg, "motor_states", None))
@@ -153,19 +160,20 @@ class RosStateReader:
             raw = np.asarray(points, dtype=np.float32).reshape((-1, 3))
         finite = np.isfinite(raw).all(axis=1)
         points = raw[finite]
-        self._store(self.lidar, points, msg)
-        self.lidar.point_count = int(raw.shape[0])
-        self.lidar.finite_point_count = int(finite.sum())
-        self.lidar.invalid_point_count = int((~finite).sum())
-        if points.size:
-            ranges = np.linalg.norm(points[:, :2], axis=1)
-            self.lidar.range_min_m = float(ranges.min())
-            self.lidar.range_max_m = float(ranges.max())
-            self.lidar.near_origin_point_count = int((ranges < 0.15).sum())
-        else:
-            self.lidar.range_min_m = 0.0
-            self.lidar.range_max_m = 0.0
-            self.lidar.near_origin_point_count = 0
+        with self.lock:
+            self._store(self.lidar, points, msg)
+            self.lidar.point_count = int(raw.shape[0])
+            self.lidar.finite_point_count = int(finite.sum())
+            self.lidar.invalid_point_count = int((~finite).sum())
+            if points.size:
+                ranges = np.linalg.norm(points[:, :2], axis=1)
+                self.lidar.range_min_m = float(ranges.min())
+                self.lidar.range_max_m = float(ranges.max())
+                self.lidar.near_origin_point_count = int((ranges < 0.15).sum())
+            else:
+                self.lidar.range_min_m = 0.0
+                self.lidar.range_max_m = 0.0
+                self.lidar.near_origin_point_count = 0
 
     def _odom_callback(self, msg):
         twist = msg.twist.twist
@@ -197,44 +205,63 @@ class RosStateReader:
 
     def spin_once(self, timeout_sec=0.0):
         import rclpy
+        if self._executor is not None:
+            raise RuntimeError("spin_once cannot be used while background spinning is active")
         rclpy.spin_once(self.node, timeout_sec=timeout_sec)
 
+    def start_background_spin(self):
+        """Continuously service ROS callbacks while callers read latest snapshots."""
+        if self._executor is not None:
+            return
+        self._executor = self._executor_type()
+        self._executor.add_node(self.node)
+        self._spin_thread = threading.Thread(
+            target=self._executor.spin,
+            name="go2-ros-callbacks",
+            daemon=True,
+        )
+        self._spin_thread.start()
+
     def close(self):
+        if self._executor is not None:
+            self._executor.shutdown(timeout_sec=1.0)
+            if self._spin_thread is not None:
+                self._spin_thread.join(timeout=2.0)
+            self._executor = None
+            self._spin_thread = None
         self.node.destroy_node()
         if self._owns_rclpy and self._rclpy.ok():
             self._rclpy.shutdown()
 
-    def health(self, max_sensor_age=0.25):
-        for slot in (self.lowstate, self.lidar, self.odom, self.wireless, self.goal):
-            age = slot.age
-            stale = age is None or age > float(max_sensor_age)
-            if stale and not slot._stale_reported:
-                slot.stale_count += 1
-            slot._stale_reported = stale
-        values = []
-        for slot in (self.lowstate, self.lidar, self.odom, self.wireless, self.goal):
-            if slot.value is not None:
-                values.append(slot.value if not hasattr(slot.value, "__dict__") else _dataclass_values(slot.value))
-        ages = {
-            "lowstate": self.lowstate.age,
-            "lidar": self.lidar.age,
-            "odom": self.odom.age,
-            "wireless": self.wireless.age,
-            "goal": self.goal.age,
-        }
-        return {
-            "ages": ages,
-            "sensor_ages": {name: ages[name] for name in ("lowstate", "lidar", "odom", "wireless")},
-            "streams": {
-                "lowstate": self.lowstate.summary(),
-                "lidar": self.lidar.summary(),
-                "odom": self.odom.summary(),
-                "wireless": self.wireless.summary(),
-                "goal": self.goal.summary(),
-            },
-            "finite_values": values,
-            "wireless_emergency": wireless_emergency(self.wireless.value),
-        }
+    def health(self, max_sensor_age=0.25, sensor_max_ages=None):
+        thresholds = _resolve_sensor_max_ages(max_sensor_age, sensor_max_ages)
+        with self.lock:
+            slots = {
+                "lowstate": self.lowstate,
+                "lidar": self.lidar,
+                "odom": self.odom,
+                "wireless": self.wireless,
+                "goal": self.goal,
+            }
+            for name, slot in slots.items():
+                age = slot.age
+                stale = not is_fresh(age, thresholds[name])
+                if stale and not slot._stale_reported:
+                    slot.stale_count += 1
+                slot._stale_reported = stale
+            values = []
+            for slot in slots.values():
+                if slot.value is not None:
+                    values.append(slot.value if not hasattr(slot.value, "__dict__") else _dataclass_values(slot.value))
+            ages = {name: slot.age for name, slot in slots.items()}
+            return {
+                "ages": ages,
+                "sensor_ages": {name: ages[name] for name in ("lowstate", "lidar", "odom", "wireless")},
+                "sensor_thresholds": thresholds,
+                "streams": {name: slot.summary() for name, slot in slots.items()},
+                "finite_values": values,
+                "wireless_emergency": wireless_emergency(self.wireless.value),
+            }
 
 
 def _message_timestamp(message):
@@ -242,6 +269,25 @@ def _message_timestamp(message):
         return 0.0
     stamp = message.header.stamp
     return float(getattr(stamp, "sec", 0)) + float(getattr(stamp, "nanosec", 0)) * 1e-9
+
+
+def is_fresh(age, max_age):
+    """Return whether a received sample is usable under its stream-specific budget."""
+    if age is None:
+        return False
+    age = float(age)
+    return np.isfinite(age) and 0.0 <= age <= float(max_age)
+
+
+def _resolve_sensor_max_ages(default, overrides=None):
+    values = {name: float(default) for name in ("lowstate", "odom", "lidar", "wireless", "goal")}
+    if overrides:
+        for name, value in overrides.items():
+            if name in values:
+                values[name] = float(value)
+    if any(value <= 0.0 or not np.isfinite(value) for value in values.values()):
+        raise ValueError("sensor freshness thresholds must be finite and positive")
+    return values
 
 
 def _message_frame_id(message):
