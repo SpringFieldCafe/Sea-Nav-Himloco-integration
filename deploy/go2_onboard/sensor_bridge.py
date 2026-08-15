@@ -14,6 +14,7 @@ from .ipc_schema import encode_packet, make_packet
 from .lidar_ray_adapter import NumpyLidarRayAdapter
 from .ros_state_reader import RosStateReader
 from .runtime import Topics, quat_to_gravity, quat_to_yaw
+from .timing import NumericStats, RateStats
 
 
 DEFAULT_SOCKET = "/tmp/sea_nav_shadow.sock"
@@ -49,6 +50,7 @@ class SensorBridge:
         self.sequence = 0
 
     def snapshot(self):
+        snapshot_start = time.perf_counter()
         with self.reader.lock:
             if self.reader.goal.value is not None:
                 self.goal_manager.update(self.reader.goal.value)
@@ -74,7 +76,9 @@ class SensorBridge:
             joint_vel = low.dq_motor
             gyro = low.gyro
         gravity = quat_to_gravity(low_quaternion)
+        lidar_start = time.perf_counter()
         rays = self.rays.project(lidar) if lidar is not None else np.full((1, 41), 5.0, dtype=np.float32)
+        lidar_processing_ms = (time.perf_counter() - lidar_start) * 1000.0
         if odom is None:
             linear = np.zeros(3, dtype=np.float32)
             odom_angular = np.zeros(3, dtype=np.float32)
@@ -108,7 +112,10 @@ class SensorBridge:
             validity=valid,
         )
         self.sequence += 1
-        return packet, health
+        return packet, health, {
+            "snapshot_build_ms": (time.perf_counter() - snapshot_start) * 1000.0,
+            "lidar_processing_ms": lidar_processing_ms,
+        }
 
     def close(self):
         self.reader.close()
@@ -128,6 +135,14 @@ def run(args):
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
     log = open(args.log, "a", encoding="utf-8") if args.log else None
     connection = None
+    rate_stats = RateStats()
+    snapshot_stats = NumericStats()
+    lidar_stats = NumericStats()
+    encode_stats = NumericStats()
+    send_stats = NumericStats()
+    log_stats = NumericStats()
+    last_log_write_ms = 0.0
+    last_summary = time.monotonic()
     print(f"[sensor_bridge] listening socket={args.socket}")
     print("[safety] ROS sensor reader only; no Torch, LowCmd, SportClient, or write path")
     try:
@@ -141,27 +156,60 @@ def run(args):
                 except socket.timeout:
                     continue
             cycle = time.perf_counter()
-            packet, health = bridge.snapshot()
+            packet, health, timing = bridge.snapshot()
+            snapshot_stats.add(timing["snapshot_build_ms"])
+            lidar_stats.add(timing["lidar_processing_ms"])
+            encode_start = time.perf_counter()
+            payload = encode_packet(packet)
+            encode_ms = (time.perf_counter() - encode_start) * 1000.0
+            encode_stats.add(encode_ms)
+            send_start = time.perf_counter()
             try:
-                connection.sendall(encode_packet(packet))
+                connection.sendall(payload)
             except (BrokenPipeError, ConnectionResetError, socket.timeout):
                 print("[sensor_bridge] worker disconnected; stopping")
                 break
+            send_ms = (time.perf_counter() - send_start) * 1000.0
+            send_stats.add(send_ms)
+            send_finished = time.perf_counter()
+            rate_stats.observe(send_finished)
             record = {
                 "mode": "sensor_bridge", "timestamp": time.time(), "sequence": packet["sequence"],
                 "packet_validity": packet["validity"], "sensor_age": packet["sensor_age"],
                 "freshness_thresholds": health["sensor_thresholds"],
-                "packet_rate_hz": 1.0 / max(time.perf_counter() - cycle, 1e-6),
-                "ipc_latency_ms": (time.perf_counter() - cycle) * 1000.0,
+                "packet_rate_hz": rate_stats.current_rate_hz(),
+                "snapshot_build_ms": timing["snapshot_build_ms"],
+                "lidar_processing_ms": timing["lidar_processing_ms"],
+                "ipc_encode_ms": encode_ms,
+                "ipc_send_ms": send_ms,
+                "log_write_ms": last_log_write_ms,
+                "loop_total_ms": (send_finished - cycle) * 1000.0,
+                "sleep_ms": 0.0,
+                "ipc_latency_ms": (send_finished - cycle) * 1000.0,
                 "lowcmd_sent": False,
             }
-            if log:
-                log.write(json.dumps(record, separators=(",", ":")) + "\n")
-                log.flush()
-            print(json.dumps(record, separators=(",", ":")))
             elapsed = time.perf_counter() - cycle
             if elapsed < args.period:
+                sleep_start = time.perf_counter()
                 time.sleep(args.period - elapsed)
+                record["sleep_ms"] = (time.perf_counter() - sleep_start) * 1000.0
+            log_start = time.perf_counter()
+            if log:
+                log.write(json.dumps(record, separators=(",", ":")) + "\n")
+            last_log_write_ms = (time.perf_counter() - log_start) * 1000.0
+            log_stats.add(last_log_write_ms)
+            if time.monotonic() - last_summary >= args.summary_interval:
+                summary = {"mode": "sensor_bridge", "state": "RUNNING", **rate_stats.summary()}
+                summary.update({
+                    "snapshot_p95_ms": snapshot_stats.percentile(0.95),
+                    "lidar_p95_ms": lidar_stats.percentile(0.95),
+                    "encode_p95_ms": encode_stats.percentile(0.95),
+                    "send_p95_ms": send_stats.percentile(0.95),
+                    "log_p95_ms": log_stats.percentile(0.95),
+                    "lowcmd_sent": False,
+                })
+                print("[sensor_bridge] " + json.dumps(summary, separators=(",", ":")))
+                last_summary = time.monotonic()
     except KeyboardInterrupt:
         print("[sensor_bridge] stopped")
     finally:
@@ -182,6 +230,7 @@ def build_parser():
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--duration", type=float, default=0.0)
     parser.add_argument("--control-hz", type=float, default=50.0)
+    parser.add_argument("--summary-interval", type=float, default=1.0)
     parser.add_argument("--max-sensor-age", type=float, default=None,
                         help="legacy override; prefer per-sensor freshness options")
     parser.add_argument("--lowstate-max-age", type=float, default=None)

@@ -26,6 +26,7 @@ from deploy.go2_onboard.ros_state_reader import Latest, is_fresh
 from deploy.go2_onboard.runtime import _health_for_log
 from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor, _is_finite
 from deploy.go2_onboard.sensor_bridge import duration_expired
+from deploy.go2_onboard.timing import RateStats
 
 
 def test_goal_transform_global_to_body_and_body_goal():
@@ -205,6 +206,24 @@ def test_sensor_bridge_duration_starts_after_worker_connection():
     assert "connection, _ = server.accept()" in source
 
 
+def test_timing_stats_report_target_rate_and_percentiles():
+    stats = RateStats()
+    stats.observe(0.00)
+    stats.observe(0.02)
+    stats.observe(0.04)
+    summary = stats.summary()
+    assert summary["mean_rate_hz"] == pytest.approx(50.0)
+    assert summary["p50_period_ms"] == pytest.approx(20.0)
+    assert summary["p95_period_ms"] == pytest.approx(20.0)
+
+
+def test_shadow_logs_timing_breakdown_without_per_packet_stdout_or_flush():
+    for filename in ("sensor_bridge.py", "shadow_worker.py"):
+        source = Path("deploy/go2_onboard", filename).read_text(encoding="utf-8")
+        assert ".flush()" not in source
+        assert "print(json.dumps(record" not in source
+
+
 def test_split_shadow_ipc_packet_is_one_way_and_shape_checked():
     packet = make_packet(
         sequence=7,
@@ -302,6 +321,11 @@ def test_offline_split_shadow_ipc_smoke():
             assert all(record["lowcmd_sent"] is False for record in records)
             assert records[-1]["sea_observation_shape"] == [1, 550]
             assert records[-1]["him_observation_shape"] == [1, 270]
+            for field in (
+                "ipc_receive_wait_ms", "decode_ms", "sea_obs_build_ms", "sea_inference_latency_ms",
+                "him_obs_build_ms", "him_inference_latency_ms", "loop_total_ms", "log_write_ms",
+            ):
+                assert field in records[-1]
         finally:
             if worker.poll() is None:
                 worker.terminate()

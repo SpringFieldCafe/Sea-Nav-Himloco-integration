@@ -14,6 +14,7 @@ from .ipc_schema import decode_packet
 from .joint_mapping import make_policy_to_motor
 from .model_loader import infer, load_himloco_policy, load_navigation_policy
 from .navigation_observation import NavigationObservation
+from .timing import NumericStats, RateStats
 
 
 DEFAULT_SOCKET = "/tmp/sea_nav_shadow.sock"
@@ -50,10 +51,23 @@ def run(args):
     sock.settimeout(1.0)
     buffer = b""
     last_sequence = None
-    last_packet_received = None
+    rate_stats = RateStats()
+    receive_wait_stats = NumericStats()
+    decode_stats = NumericStats()
+    sea_obs_stats = NumericStats()
+    sea_inference_stats = NumericStats()
+    him_obs_stats = NumericStats()
+    him_inference_stats = NumericStats()
+    loop_stats = NumericStats()
+    log_stats = NumericStats()
+    last_log_write_ms = 0.0
+    last_summary = time.monotonic()
+    deadline_miss_count = 0
     try:
         while args.duration <= 0 or time.monotonic() - started < args.duration:
+            receive_start = time.perf_counter()
             chunk = sock.recv(65536)
+            receive_wait_ms = (time.perf_counter() - receive_start) * 1000.0
             if not chunk:
                 print("[shadow_worker] sensor bridge disconnected; stopping")
                 break
@@ -62,38 +76,69 @@ def run(args):
                 line, buffer = buffer.split(b"\n", 1)
                 if not line:
                     continue
+                packet_start = time.perf_counter()
+                decode_start = time.perf_counter()
                 packet = decode_packet(line)
+                decode_ms = (time.perf_counter() - decode_start) * 1000.0
+                decode_stats.add(decode_ms)
                 if last_sequence is not None and packet["sequence"] <= last_sequence:
                     raise RuntimeError("IPC sequence did not increase")
                 last_sequence = packet["sequence"]
-                receive_time = time.perf_counter()
-                packet_rate_hz = (
-                    0.0 if last_packet_received is None
-                    else 1.0 / max(receive_time - last_packet_received, 1e-6)
-                )
-                last_packet_received = receive_time
+                rate_stats.observe(packet_start)
+                receive_wait_stats.add(receive_wait_ms)
                 loop_start = time.perf_counter()
                 record, last_command = process_packet(
                     packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device,
                     last_command, freshness,
                 )
                 loop_latency_ms = (time.perf_counter() - loop_start) * 1000.0
+                loop_total_ms = (time.perf_counter() - packet_start) * 1000.0
+                deadline_miss = loop_total_ms > 20.0
+                if deadline_miss:
+                    deadline_miss_count += 1
+                if record.get("runtime_state") == "SHADOW":
+                    sea_obs_stats.add(record["sea_obs_build_ms"])
+                    sea_inference_stats.add(record["sea_inference_latency_ms"])
+                    him_obs_stats.add(record["him_obs_build_ms"])
+                    him_inference_stats.add(record["him_inference_latency_ms"])
+                loop_stats.add(loop_latency_ms)
                 record.update({
                     "mode": "shadow_worker",
                     "timestamp": time.time(),
                     "sequence": packet["sequence"],
-                    "packet_rate_hz": packet_rate_hz,
+                    "packet_rate_hz": rate_stats.current_rate_hz(),
+                    "ipc_receive_wait_ms": receive_wait_ms,
+                    "decode_ms": decode_ms,
                     "sensor_age": packet["sensor_age"],
                     "packet_validity": packet["validity"],
                     "goal_body": packet["goal_body"],
                     "loop_latency_ms": loop_latency_ms,
-                    "deadline_miss": loop_latency_ms > 20.0,
+                    "loop_total_ms": loop_total_ms,
+                    "log_write_ms": last_log_write_ms,
+                    "deadline_miss": deadline_miss,
                     "lowcmd_sent": False,
                 })
+                log_start = time.perf_counter()
                 if log:
                     log.write(json.dumps(record, separators=(",", ":")) + "\n")
-                    log.flush()
-                print(json.dumps(record, separators=(",", ":")))
+                last_log_write_ms = (time.perf_counter() - log_start) * 1000.0
+                log_stats.add(last_log_write_ms)
+                if time.monotonic() - last_summary >= args.summary_interval:
+                    summary = {"mode": "shadow_worker", "state": record["runtime_state"], **rate_stats.summary()}
+                    summary.update({
+                        "receive_wait_p95_ms": receive_wait_stats.percentile(0.95),
+                        "decode_p95_ms": decode_stats.percentile(0.95),
+                        "sea_obs_p95_ms": sea_obs_stats.percentile(0.95),
+                        "sea_p95_ms": sea_inference_stats.percentile(0.95),
+                        "him_obs_p95_ms": him_obs_stats.percentile(0.95),
+                        "him_p95_ms": him_inference_stats.percentile(0.95),
+                        "loop_p95_ms": loop_stats.percentile(0.95),
+                        "log_p95_ms": log_stats.percentile(0.95),
+                        "deadline_misses": deadline_miss_count,
+                        "lowcmd_sent": False,
+                    })
+                    print("[shadow_worker] " + json.dumps(summary, separators=(",", ":")))
+                    last_summary = time.monotonic()
     except KeyboardInterrupt:
         print("[shadow_worker] stopped")
     finally:
@@ -121,22 +166,26 @@ def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, 
                                 "base_linear_velocity_body", "base_angular_velocity_body", "lidar_rays", "goal_body")}
     q_policy = torch_packet["joint_pos"][:, policy_to_motor]
     dq_policy = torch_packet["joint_vel"][:, policy_to_motor]
+    sea_obs_start = time.perf_counter()
     nav_input = nav_obs.build(
         torch_packet["projected_gravity"], last_command,
         torch_packet["base_linear_velocity_body"], torch_packet["base_angular_velocity_body"],
         torch_packet["lidar_rays"], torch_packet["goal_body"],
     )
+    sea_obs_build_ms = (time.perf_counter() - sea_obs_start) * 1000.0
     nav_start = time.perf_counter()
     nav_raw = infer(sea, nav_input, 3)
     nav_latency_ms = (time.perf_counter() - nav_start) * 1000.0
     raw_command = nav_raw[0].detach().cpu().numpy()
     filtered_command = bridge.filter(raw_command)
     command_tensor = torch.from_numpy(filtered_command).reshape(1, 3).to(device)
+    him_obs_start = time.perf_counter()
     him_input = him_obs.build(
         command_tensor, torch_packet["base_angular_velocity_body"], torch_packet["projected_gravity"],
         q_policy - torch.tensor([0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5], device=device).reshape(1, 12),
         dq_policy,
     )
+    him_obs_build_ms = (time.perf_counter() - him_obs_start) * 1000.0
     him_start = time.perf_counter()
     him_action = infer(him, him_input, 12)
     him_latency_ms = (time.perf_counter() - him_start) * 1000.0
@@ -147,10 +196,12 @@ def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, 
         "sea_observation_min": float(nav_input.min().item()),
         "sea_observation_max": float(nav_input.max().item()),
         "sea_raw_command": raw_command.tolist(), "sea_filtered_command": filtered_command.tolist(),
-        "command_filter_alpha": bridge.filter_alpha, "sea_inference_latency_ms": nav_latency_ms,
+        "command_filter_alpha": bridge.filter_alpha, "sea_obs_build_ms": sea_obs_build_ms,
+        "sea_inference_latency_ms": nav_latency_ms,
         "him_observation_shape": list(him_input.shape), "him_observation_finite": bool(torch.isfinite(him_input).all()),
         "him_observation_min": float(him_input.min().item()),
         "him_observation_max": float(him_input.max().item()),
+        "him_obs_build_ms": him_obs_build_ms,
         "him_action": him_action[0].detach().cpu().tolist(),
         "him_action_min": float(him_action.min().item()),
         "him_action_max": float(him_action.max().item()),
@@ -165,6 +216,7 @@ def build_parser():
     parser.add_argument("--duration", type=float, default=0.0)
     parser.add_argument("--connect-timeout", type=float, default=10.0)
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda", "cuda:0"))
+    parser.add_argument("--summary-interval", type=float, default=1.0)
     parser.add_argument("--command-filter-alpha", type=float, default=0.15)
     parser.add_argument("--lowstate-max-age", type=float, default=0.10)
     parser.add_argument("--odom-max-age", type=float, default=0.10)
