@@ -77,14 +77,33 @@ class RateStats:
 
 
 class FixedRate:
-    def __init__(self, hz):
+    """Run a loop against monotonic absolute deadlines.
+
+    ``clock`` and ``sleeper`` are injectable so deadline behavior can be
+    tested without waiting in real time.  Normal callers use monotonic time
+    and ``time.sleep``.
+    """
+
+    def __init__(self, hz, clock=None, sleeper=None):
+        if hz <= 0.0:
+            raise ValueError("rate must be positive")
+        self._clock = time.monotonic if clock is None else clock
+        self._sleeper = time.sleep if sleeper is None else sleeper
         self.period = 1.0 / hz
-        self.next_deadline = time.monotonic()
+        self.next_deadline = self._clock()
 
     def sleep(self):
         self.next_deadline += self.period
-        delay = self.next_deadline - time.monotonic()
+        now = self._clock()
+        delay = self.next_deadline - now
+        deadline_miss = delay < 0.0
         if delay > 0:
-            time.sleep(delay)
+            self._sleeper(delay)
         else:
-            self.next_deadline = time.monotonic()
+            # Drop missed ticks instead of carrying lateness forever.
+            self.next_deadline = self._clock()
+        return {
+            "sleep_s": max(delay, 0.0),
+            "deadline_miss": deadline_miss,
+            "late_s": max(-delay, 0.0),
+        }

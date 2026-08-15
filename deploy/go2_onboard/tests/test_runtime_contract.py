@@ -26,7 +26,7 @@ from deploy.go2_onboard.ros_state_reader import Latest, is_fresh
 from deploy.go2_onboard.runtime import _health_for_log
 from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor, _is_finite
 from deploy.go2_onboard.sensor_bridge import duration_expired
-from deploy.go2_onboard.timing import RateStats
+from deploy.go2_onboard.timing import FixedRate, RateStats
 
 
 def test_goal_transform_global_to_body_and_body_goal():
@@ -257,6 +257,53 @@ def test_timing_stats_report_target_rate_and_percentiles():
     assert summary["mean_rate_hz"] == pytest.approx(50.0)
     assert summary["p50_period_ms"] == pytest.approx(20.0)
     assert summary["p95_period_ms"] == pytest.approx(20.0)
+
+
+def test_fixed_rate_uses_absolute_deadlines_not_period_plus_work():
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = FakeClock()
+    rate = FixedRate(50.0, clock=clock.monotonic, sleeper=clock.sleep)
+    starts = [clock.now]
+    results = []
+    for _ in range(5):
+        clock.now += 0.002  # simulated 2 ms of work
+        results.append(rate.sleep())
+        starts.append(clock.now)
+    periods = np.diff(starts)
+    np.testing.assert_allclose(periods, np.full(5, 0.020), atol=1e-12)
+    assert all(not result["deadline_miss"] for result in results)
+
+
+def test_fixed_rate_reports_overrun_and_resynchronizes_without_drift():
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = FakeClock()
+    rate = FixedRate(50.0, clock=clock.monotonic, sleeper=clock.sleep)
+    clock.now += 0.025
+    overrun = rate.sleep()
+    assert overrun["deadline_miss"] is True
+    assert overrun["late_s"] == pytest.approx(0.005)
+    clock.now += 0.002
+    next_tick = rate.sleep()
+    assert next_tick["deadline_miss"] is False
+    assert clock.now == pytest.approx(0.045)
 
 
 def test_shadow_logs_timing_breakdown_without_per_packet_stdout_or_flush():

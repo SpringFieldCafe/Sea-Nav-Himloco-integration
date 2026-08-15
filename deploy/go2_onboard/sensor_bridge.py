@@ -13,7 +13,7 @@ from .goal import Goal2D, GoalManager
 from .ipc_schema import encode_packet, make_packet
 from .ros_state_reader import RosStateReader
 from .runtime import Topics, quat_to_gravity, quat_to_yaw
-from .timing import NumericStats, RateStats
+from .timing import FixedRate, NumericStats, RateStats
 
 
 DEFAULT_SOCKET = "/tmp/sea_nav_shadow.sock"
@@ -144,6 +144,9 @@ def run(args):
     encode_stats = NumericStats()
     send_stats = NumericStats()
     log_stats = NumericStats()
+    scheduler = None
+    scheduler_deadline_misses = 0
+    previous_sleep_ms = 0.0
     last_log_write_ms = 0.0
     last_summary = time.monotonic()
     print(f"[sensor_bridge] listening socket={args.socket}")
@@ -155,6 +158,7 @@ def run(args):
                     connection, _ = server.accept()
                     connection.settimeout(1.0)
                     started = time.monotonic()
+                    scheduler = FixedRate(args.control_hz)
                     print("[sensor_bridge] shadow worker connected")
                 except socket.timeout:
                     continue
@@ -191,20 +195,20 @@ def run(args):
                 "ipc_send_ms": send_ms,
                 "log_write_ms": last_log_write_ms,
                 "loop_total_ms": (send_finished - cycle) * 1000.0,
-                "sleep_ms": 0.0,
+                "sleep_ms": previous_sleep_ms,
+                "deadline_miss": (send_finished - cycle) > args.period,
                 "ipc_latency_ms": (send_finished - cycle) * 1000.0,
                 "lowcmd_sent": False,
             }
-            elapsed = time.perf_counter() - cycle
-            if elapsed < args.period:
-                sleep_start = time.perf_counter()
-                time.sleep(args.period - elapsed)
-                record["sleep_ms"] = (time.perf_counter() - sleep_start) * 1000.0
             log_start = time.perf_counter()
             if log:
                 log.write(json.dumps(record, separators=(",", ":")) + "\n")
             last_log_write_ms = (time.perf_counter() - log_start) * 1000.0
             log_stats.add(last_log_write_ms)
+            schedule = scheduler.sleep()
+            previous_sleep_ms = schedule["sleep_s"] * 1000.0
+            if schedule["deadline_miss"]:
+                scheduler_deadline_misses += 1
             if time.monotonic() - last_summary >= args.summary_interval:
                 summary = {"mode": "sensor_bridge", "state": "RUNNING", **rate_stats.summary()}
                 summary.update({
@@ -213,6 +217,7 @@ def run(args):
                     "encode_p95_ms": encode_stats.percentile(0.95),
                     "send_p95_ms": send_stats.percentile(0.95),
                     "log_p95_ms": log_stats.percentile(0.95),
+                    "deadline_misses": scheduler_deadline_misses,
                     "lowcmd_sent": False,
                 })
                 print("[sensor_bridge] " + json.dumps(summary, separators=(",", ":")))
