@@ -100,3 +100,9 @@ def test_stop_transitions_to_exit_without_transport():
 
     assert called == [True]
     assert controller.state == RuntimeState.EXIT
+
+
+def test_lowstate_subscriber_is_retained_by_controller():
+    source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
+    assert "self.lowstate_subscriber = ChannelSubscriber" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source

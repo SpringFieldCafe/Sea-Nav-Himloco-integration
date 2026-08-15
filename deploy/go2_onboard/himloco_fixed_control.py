@@ -166,6 +166,7 @@ class FixedHIMLocoController:
         self.previous_action = np.zeros(12, dtype=np.float32)
         self.low_cmd = None
         self.publisher = None
+        self.lowstate_subscriber = None
         self.crc = None
         self._sdk = None
 
@@ -224,8 +225,8 @@ class FixedHIMLocoController:
         self.low_cmd = unitree_go_msg_dds__LowCmd_()
         self.publisher = ChannelPublisher("rt/lowcmd", LowCmdGo)
         self.publisher.Init()
-        subscriber = ChannelSubscriber("rt/lowstate", LowStateGo)
-        subscriber.Init(self._low_state_callback, 10)
+        self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowStateGo)
+        self.lowstate_subscriber.Init(self._low_state_callback, 10)
         self._initialize_command(self.low_cmd)
         print("[safety] SDK2 connected; no command will be sent before A-arm")
 
