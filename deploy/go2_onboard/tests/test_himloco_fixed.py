@@ -109,3 +109,11 @@ def test_lowstate_subscriber_is_retained_by_controller():
     assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
     assert ARM_WAIT_TIMEOUT == 5.0
     assert "no fresh LowState received within" in source
+
+
+def test_wait_for_arm_keeps_waiting_after_first_fresh_lowstate():
+    source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
+    wait_block = source.split("        wait_deadline =", 1)[1].split("        next_tick =", 1)[0]
+    assert "if not self.watchdog.fresh" in wait_block
+    assert "continue" in wait_block
+    assert "if key_pressed(snapshot.remote_keys, self.ARM_KEY)" in wait_block

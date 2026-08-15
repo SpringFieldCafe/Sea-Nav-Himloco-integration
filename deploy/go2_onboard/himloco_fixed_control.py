@@ -316,10 +316,11 @@ class FixedHIMLocoController:
         wait_deadline = time.monotonic() + ARM_WAIT_TIMEOUT
         while True:
             snapshot = self._snapshot()
-            if self.watchdog.fresh(snapshot.received_at):
-                break
-            if time.monotonic() >= wait_deadline:
-                raise SafetyError(f"no fresh LowState received within {ARM_WAIT_TIMEOUT:.1f}s before ARM")
+            if not self.watchdog.fresh(snapshot.received_at):
+                if time.monotonic() >= wait_deadline:
+                    raise SafetyError(f"no fresh LowState received within {ARM_WAIT_TIMEOUT:.1f}s before ARM")
+                time.sleep(0.02)
+                continue
             if key_pressed(snapshot.remote_keys, self.ESTOP_KEY):
                 raise SafetyError("wireless ESTOP before ARM")
             if key_pressed(snapshot.remote_keys, self.ARM_KEY):
