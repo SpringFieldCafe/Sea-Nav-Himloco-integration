@@ -26,6 +26,7 @@ from deploy.go2_onboard.ros_state_reader import Latest, is_fresh
 from deploy.go2_onboard.runtime import _health_for_log
 from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor, _is_finite
 from deploy.go2_onboard.sensor_bridge import duration_expired
+from deploy.go2_onboard.shadow_worker import dump_sea_observation
 from deploy.go2_onboard.timing import FixedRate, RateStats
 
 
@@ -104,6 +105,25 @@ def test_sea_nav_observation_shape_order_and_history():
     torch.testing.assert_close(frame[0, :12], torch.tensor([0.0, 0.0, -1.0, 1.0, 0.0, 0.125, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
     torch.testing.assert_close(frame[0, -2:], torch.tensor([2.0, -1.0]))
     assert torch.count_nonzero(frame[0, 55:]).item() > 0
+
+
+def test_sea_observation_dump_is_an_immutable_exact_policy_input(tmp_path):
+    observation = torch.arange(550, dtype=torch.float32).reshape(1, 550)
+    before = observation.clone()
+    packet = {"sequence": 123, "goal_body": [2.0, 1.0]}
+    output = tmp_path / "sea_observation.json"
+
+    payload = dump_sea_observation(output, observation, packet)
+
+    torch.testing.assert_close(observation, before, rtol=0.0, atol=0.0)
+    assert payload["shape"] == [1, 550]
+    assert payload["sea_observation"] == before.tolist()
+    assert payload["sea_observation_finite"] is True
+    assert payload["history_order"] == "oldest_to_newest"
+    assert payload["frame_dim"] == 55
+    assert payload["history_len"] == 10
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved["sea_observation"] == before.tolist()
 
 
 def test_himloco_observation_history_and_previous_action():
@@ -358,6 +378,7 @@ def test_offline_split_shadow_ipc_smoke():
         temp_dir = Path(temp_dir)
         socket_path = temp_dir / "shadow.sock"
         worker_log = temp_dir / "worker.jsonl"
+        sea_snapshot = temp_dir / "sea_observation.json"
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(socket_path))
         server.listen(1)
@@ -373,6 +394,10 @@ def test_offline_split_shadow_ipc_smoke():
                 str(worker_log),
                 "--connect-timeout",
                 "5",
+                "--dump-sea-observation",
+                str(sea_snapshot),
+                "--dump-sea-observation-after-samples",
+                "2",
             ],
             cwd=repo_root,
             env={**os.environ, "PYTHONPATH": str(repo_root)},
@@ -410,6 +435,12 @@ def test_offline_split_shadow_ipc_smoke():
             assert all(record["lowcmd_sent"] is False for record in records)
             assert records[-1]["sea_observation_shape"] == [1, 550]
             assert records[-1]["him_observation_shape"] == [1, 270]
+            snapshot = json.loads(sea_snapshot.read_text(encoding="utf-8"))
+            assert snapshot["sequence"] == 1
+            assert snapshot["shape"] == [1, 550]
+            assert len(snapshot["sea_observation"]) == 1
+            assert len(snapshot["sea_observation"][0]) == 550
+            assert snapshot["sea_observation_finite"] is True
             for field in (
                 "ipc_receive_wait_ms", "decode_ms", "sea_obs_build_ms", "sea_inference_latency_ms",
                 "him_obs_build_ms", "him_inference_latency_ms", "loop_total_ms", "log_write_ms",

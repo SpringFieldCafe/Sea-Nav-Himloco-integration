@@ -23,6 +23,28 @@ DEFAULT_SEA_META = "artifacts/go2_onboard/sea_nav_policy_peer_model_2000.json"
 DEFAULT_HIM = "models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt"
 
 
+def dump_sea_observation(path, observation, packet):
+    """Write one immutable copy of the exact observation passed to SEA-Nav."""
+    before_dump = observation.detach().clone()
+    payload = {
+        "timestamp": time.time(),
+        "sequence": int(packet["sequence"]),
+        "shape": list(observation.shape),
+        "goal_body": [float(value) for value in packet["goal_body"]],
+        "sea_observation": observation.detach().cpu().tolist(),
+        "sea_observation_finite": bool(torch.isfinite(observation).all()),
+        "history_order": "oldest_to_newest",
+        "frame_dim": 55,
+        "history_len": 10,
+    }
+    if not torch.equal(before_dump, observation.detach()):
+        raise RuntimeError("SEA observation changed while preparing snapshot")
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+    return payload
+
+
 def run(args):
     device = torch.device(args.device)
     sea = load_navigation_policy(args.navigation_policy, args.navigation_metadata, device)
@@ -63,6 +85,8 @@ def run(args):
     last_log_write_ms = 0.0
     last_summary = time.monotonic()
     deadline_miss_count = 0
+    shadow_samples = 0
+    sea_snapshot_dumped = False
     try:
         while args.duration <= 0 or time.monotonic() - started < args.duration:
             receive_start = time.perf_counter()
@@ -87,7 +111,7 @@ def run(args):
                 rate_stats.observe(packet_start)
                 receive_wait_stats.add(receive_wait_ms)
                 loop_start = time.perf_counter()
-                record, last_command = process_packet(
+                record, last_command, sea_observation = process_packet(
                     packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device,
                     last_command, freshness,
                 )
@@ -97,10 +121,18 @@ def run(args):
                 if deadline_miss:
                     deadline_miss_count += 1
                 if record.get("runtime_state") == "SHADOW":
+                    shadow_samples += 1
                     sea_obs_stats.add(record["sea_obs_build_ms"])
                     sea_inference_stats.add(record["sea_inference_latency_ms"])
                     him_obs_stats.add(record["him_obs_build_ms"])
                     him_inference_stats.add(record["him_inference_latency_ms"])
+                    if (
+                        args.dump_sea_observation
+                        and not sea_snapshot_dumped
+                        and shadow_samples >= args.dump_sea_observation_after_samples
+                    ):
+                        dump_sea_observation(args.dump_sea_observation, sea_observation, packet)
+                        sea_snapshot_dumped = True
                 loop_stats.add(loop_latency_ms)
                 record.update({
                     "mode": "shadow_worker",
@@ -152,7 +184,7 @@ def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, 
                    last_command, freshness):
     required = packet["validity"]
     if not all(required.get(name, False) for name in ("lowstate", "lidar", "odom", "goal")):
-        return ({"runtime_state": "STALE_SENSOR", "fault_reason": "invalid_or_missing_sensor", "lowcmd_sent": False}, last_command)
+        return ({"runtime_state": "STALE_SENSOR", "fault_reason": "invalid_or_missing_sensor", "lowcmd_sent": False}, last_command, None)
     # A fixed command-line Goal2D has no ROS receive age; validity still gates it.
     required_ages = ("lowstate", "lidar", "odom")
     if any(
@@ -160,7 +192,7 @@ def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, 
         or packet["sensor_age"].get(name) > freshness[name]
         for name in required_ages
     ):
-        return ({"runtime_state": "STALE_SENSOR", "fault_reason": "stale_sensor", "lowcmd_sent": False}, last_command)
+        return ({"runtime_state": "STALE_SENSOR", "fault_reason": "stale_sensor", "lowcmd_sent": False}, last_command, None)
     torch_packet = {key: torch.as_tensor(packet[key], dtype=torch.float32, device=device).reshape(1, -1)
                     for key in ("joint_pos", "joint_vel", "imu_ang_vel", "projected_gravity",
                                 "base_linear_velocity_body", "base_angular_velocity_body", "lidar_rays", "goal_body")}
@@ -207,7 +239,7 @@ def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, 
         "him_action_max": float(him_action.max().item()),
         "him_inference_latency_ms": him_latency_ms,
         "lowcmd_sent": False,
-    }, command_tensor
+    }, command_tensor, nav_input
 
 
 def build_parser():
@@ -225,6 +257,8 @@ def build_parser():
     parser.add_argument("--navigation-policy", default=DEFAULT_SEA)
     parser.add_argument("--navigation-metadata", default=DEFAULT_SEA_META)
     parser.add_argument("--himloco-policy", default=DEFAULT_HIM)
+    parser.add_argument("--dump-sea-observation", default=None)
+    parser.add_argument("--dump-sea-observation-after-samples", type=int, default=100)
     return parser
 
 
