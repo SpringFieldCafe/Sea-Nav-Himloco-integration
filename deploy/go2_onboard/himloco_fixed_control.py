@@ -32,6 +32,7 @@ EXPECTED_OUTPUT_DIM = 12
 CONTROL_HZ = 50.0
 CONTROL_DT = 1.0 / CONTROL_HZ
 STALE_MAX_AGE = 0.10
+ARM_WAIT_TIMEOUT = 5.0
 ACTION_CLIP = 100.0
 ACTION_SCALE = 0.25
 KP = 20.0
@@ -312,10 +313,13 @@ class FixedHIMLocoController:
     def run(self):
         self.state = RuntimeState.WAIT_FOR_ARM
         print("[safety] WAIT_FOR_ARM: press A to arm; Select=STOP; B=ESTOP; Ctrl+C=STOP")
+        wait_deadline = time.monotonic() + ARM_WAIT_TIMEOUT
         while True:
             snapshot = self._snapshot()
-            if not self.watchdog.fresh(snapshot.received_at):
-                raise SafetyError("LowState stale before ARM")
+            if self.watchdog.fresh(snapshot.received_at):
+                break
+            if time.monotonic() >= wait_deadline:
+                raise SafetyError(f"no fresh LowState received within {ARM_WAIT_TIMEOUT:.1f}s before ARM")
             if key_pressed(snapshot.remote_keys, self.ESTOP_KEY):
                 raise SafetyError("wireless ESTOP before ARM")
             if key_pressed(snapshot.remote_keys, self.ARM_KEY):

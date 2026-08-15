@@ -13,6 +13,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     EXPECTED_OUTPUT_DIM,
     EXPECTED_SHA256,
     FixedHIMLocoController,
+    ARM_WAIT_TIMEOUT,
     KD,
     KP,
     POLICY_TO_MOTOR,
@@ -106,3 +107,5 @@ def test_lowstate_subscriber_is_retained_by_controller():
     source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
     assert "self.lowstate_subscriber = ChannelSubscriber" in source
     assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
+    assert ARM_WAIT_TIMEOUT == 5.0
+    assert "no fresh LowState received within" in source
