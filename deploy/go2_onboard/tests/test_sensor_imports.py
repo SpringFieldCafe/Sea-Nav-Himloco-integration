@@ -12,7 +12,11 @@ def test_sensor_modules_import_without_torch():
     env["PATH"] = "/usr/bin:/bin"
     env.pop("PYTHONHOME", None)
     result = subprocess.run(
-        ["/usr/bin/python3", "-c", "import deploy.go2_onboard.diagnostics, deploy.go2_onboard.runtime"],
+        [
+            "/usr/bin/python3",
+            "-c",
+            "import deploy.go2_onboard.diagnostics, deploy.go2_onboard.runtime, deploy.go2_onboard.sensor_bridge",
+        ],
         env=env,
         capture_output=True,
         text=True,

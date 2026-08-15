@@ -1,6 +1,13 @@
 import math
 import ast
+import json
+import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+import time
 
 import numpy as np
 import pytest
@@ -9,6 +16,7 @@ import torch
 from deploy.go2_onboard.command_bridge import ReadOnlyCommandBridge
 from deploy.go2_onboard.goal import Goal2D, GoalManager
 from deploy.go2_onboard.himloco_observation import HIMLocoObservation
+from deploy.go2_onboard.ipc_schema import decode_packet, encode_packet, make_packet
 from deploy.go2_onboard.joint_mapping import make_motor_to_policy, make_policy_to_motor
 from deploy.go2_onboard.lidar_ray_adapter import LidarRayAdapter
 from deploy.go2_onboard.model_loader import load_himloco_policy, load_navigation_policy
@@ -166,6 +174,113 @@ def test_shadow_runtime_has_no_ros_write_calls():
     assert "LowCmd" not in imported_names | imported_from_names
     assert "create_publisher" not in called_attributes
     assert "publish" not in called_attributes
+
+
+def test_split_shadow_ipc_packet_is_one_way_and_shape_checked():
+    packet = make_packet(
+        sequence=7,
+        timestamp_monotonic=1.0,
+        timestamp_wall=2.0,
+        joint_pos=np.zeros(12),
+        joint_vel=np.zeros(12),
+        imu_ang_vel=np.zeros(3),
+        projected_gravity=[0.0, 0.0, -1.0],
+        base_linear_velocity_body=np.zeros(3),
+        base_angular_velocity_body=np.zeros(3),
+        lidar_rays=np.full(41, 5.0),
+        goal_body=[2.0, 0.0],
+        sensor_age={"lowstate": 0.01, "lidar": 0.02, "odom": 0.01, "goal": 0.01, "wireless": None},
+        validity={"lowstate": True, "lidar": True, "odom": True, "goal": True},
+    )
+    decoded = decode_packet(encode_packet(packet))
+    assert decoded["sequence"] == 7
+    assert decoded["lidar_rays"] == [5.0] * 41
+    assert "action" not in decoded
+    assert "command" not in decoded
+    invalid = dict(packet)
+    invalid["goal_body"] = [float("nan"), 0.0]
+    with pytest.raises(ValueError, match="goal_body"):
+        encode_packet(invalid)
+
+
+def test_split_shadow_modules_have_no_robot_write_symbols():
+    for filename in ("sensor_bridge.py", "shadow_worker.py", "shadow_fixture.py"):
+        source = Path("deploy/go2_onboard", filename).read_text(encoding="utf-8")
+        assert "create_publisher" not in source
+        assert "publish(" not in source
+    worker_source = Path("deploy/go2_onboard/shadow_worker.py").read_text(encoding="utf-8")
+    assert "from unitree_go.msg import LowCmd" not in worker_source
+    assert "from unitree_go.msg import SportClient" not in worker_source
+    assert "send_low_level" not in worker_source
+    assert "sock.send" not in worker_source
+
+
+def test_offline_split_shadow_ipc_smoke():
+    repo_root = Path(__file__).resolve().parents[3]
+    with tempfile.TemporaryDirectory(prefix="sea_nav_shadow_test_") as temp_dir:
+        temp_dir = Path(temp_dir)
+        socket_path = temp_dir / "shadow.sock"
+        worker_log = temp_dir / "worker.jsonl"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen(1)
+        server.settimeout(10.0)
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "deploy.go2_onboard.shadow_worker",
+                "--socket",
+                str(socket_path),
+                "--log",
+                str(worker_log),
+                "--connect-timeout",
+                "5",
+            ],
+            cwd=repo_root,
+            env={**os.environ, "PYTHONPATH": str(repo_root)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            connection, _ = server.accept()
+            packet_kwargs = dict(
+                timestamp_monotonic=time.monotonic(),
+                timestamp_wall=time.time(),
+                joint_pos=[0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5],
+                joint_vel=np.zeros(12),
+                imu_ang_vel=np.zeros(3),
+                projected_gravity=[0.0, 0.0, -1.0],
+                base_linear_velocity_body=np.zeros(3),
+                base_angular_velocity_body=np.zeros(3),
+                lidar_rays=np.full(41, 5.0),
+                goal_body=[2.0, 0.0],
+                sensor_age={"lowstate": 0.01, "lidar": 0.01, "odom": 0.01, "goal": 0.01, "wireless": None},
+                validity={"lowstate": True, "lidar": True, "odom": True, "goal": True},
+            )
+            for sequence in range(3):
+                packet = make_packet(sequence=sequence, **packet_kwargs)
+                connection.sendall(encode_packet(packet))
+                time.sleep(0.02)
+            connection.close()
+            server.close()
+            stdout, stderr = worker.communicate(timeout=15)
+            assert worker.returncode == 0, stderr
+            records = [json.loads(line) for line in worker_log.read_text(encoding="utf-8").splitlines()]
+            assert len(records) == 3
+            assert all(record["mode"] == "shadow_worker" for record in records)
+            assert all(record["lowcmd_sent"] is False for record in records)
+            assert records[-1]["sea_observation_shape"] == [1, 550]
+            assert records[-1]["him_observation_shape"] == [1, 270]
+        finally:
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=5)
+            try:
+                server.close()
+            except OSError:
+                pass
 
 
 @pytest.mark.parametrize(
