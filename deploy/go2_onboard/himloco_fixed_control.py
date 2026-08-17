@@ -13,6 +13,7 @@ import hashlib
 import struct
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -31,6 +32,9 @@ EXPECTED_INPUT_DIM = 270
 EXPECTED_OUTPUT_DIM = 12
 CONTROL_HZ = 50.0
 CONTROL_DT = 1.0 / CONTROL_HZ
+POSE_TRANSITION_DURATION = 2.0
+POSE_KP = 40.0
+POSE_KD = 0.6
 STALE_MAX_AGE = 0.10
 ARM_WAIT_TIMEOUT = 5.0
 ACTION_CLIP = 100.0
@@ -51,7 +55,10 @@ POLICY_TO_MOTOR = tuple(make_policy_to_motor())
 
 class RuntimeState(str, Enum):
     INIT = "INIT"
-    WAIT_FOR_ARM = "WAIT_FOR_ARM"
+    WAIT_FOR_POSE_ARM = "WAIT_FOR_POSE_ARM"
+    POSE_TRANSITION = "POSE_TRANSITION"
+    DEFAULT_POSE_HOLD = "DEFAULT_POSE_HOLD"
+    WAIT_FOR_POLICY_ARM = "WAIT_FOR_POLICY_ARM"
     ACTIVE = "ACTIVE"
     STOPPING = "STOPPING"
     DAMPING = "DAMPING"
@@ -110,6 +117,14 @@ def build_target_q(action: Sequence[float]) -> np.ndarray:
     return DEFAULT_ANGLES + ACTION_SCALE * clipped
 
 
+def pose_transition_target(initial_q: Sequence[float], step: int, steps: int) -> np.ndarray:
+    initial_q = np.asarray(initial_q, dtype=np.float32).reshape(-1)
+    if initial_q.shape != (12,) or steps < 2 or not 0 <= step < steps:
+        raise SafetyError("invalid pose transition inputs")
+    alpha = step / float(steps - 1)
+    return initial_q * (1.0 - alpha) + DEFAULT_ANGLES * alpha
+
+
 def build_observation(
     him_obs: HIMLocoObservation,
     command: Sequence[float],
@@ -117,6 +132,7 @@ def build_observation(
     projected_gravity: Sequence[float],
     joint_pos_policy: Sequence[float],
     joint_vel_policy: Sequence[float],
+    repeat_history: bool = False,
 ) -> torch.Tensor:
     """Build the exact 45x6 current deployment contract."""
     tensor = lambda value: torch.as_tensor(value, dtype=torch.float32).reshape(1, -1)
@@ -125,7 +141,7 @@ def build_observation(
     gravity_t = tensor(projected_gravity)
     q_t = tensor(joint_pos_policy) - tensor(DEFAULT_ANGLES)
     dq_t = tensor(joint_vel_policy)
-    return him_obs.build(command_t, gyro_t, gravity_t, q_t, dq_t)
+    return him_obs.build(command_t, gyro_t, gravity_t, q_t, dq_t, repeat_history=repeat_history)
 
 
 def decode_remote_keys(raw_remote) -> int:
@@ -153,6 +169,7 @@ class FixedHIMLocoController:
     """SDK2 transport and safety state machine; constructed only on the field."""
 
     ARM_KEY = 8       # A, from historical RemoteController.KeyMap
+    POSE_ARM_KEY = 2   # Start, historical zero-torque/pose transition trigger
     STOP_KEY = 3      # Select, historical normal exit
     ESTOP_KEY = 9     # B, independent emergency stop for this milestone
 
@@ -171,6 +188,13 @@ class FixedHIMLocoController:
         self.lowstate_subscriber = None
         self.crc = None
         self._sdk = None
+        self.lowstate_rx_count = 0
+        self.last_lowstate_rx = 0.0
+        self.lowstate_intervals = deque(maxlen=512)
+        self.last_policy_ms = 0.0
+        self.last_publish_ms = 0.0
+        self.loop_durations = deque(maxlen=512)
+        self._last_summary = 0.0
 
     def validate_model(self):
         path = Path(self.args.policy).resolve()
@@ -234,9 +258,11 @@ class FixedHIMLocoController:
         self.publisher = ChannelPublisher("rt/lowcmd", LowCmdGo)
         self.publisher.Init()
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowStateGo)
-        self.lowstate_subscriber.Init(self._low_state_callback, 10)
+        # Keep the callback on the SDK/DDS reader path.  A bounded intermediate
+        # queue can retain stale 500 Hz samples while the control loop runs.
+        self.lowstate_subscriber.Init(self._low_state_callback, 0)
         self._initialize_command(self.low_cmd)
-        print("[safety] SDK2 connected; no command will be sent before A-arm")
+        print("[safety] SDK2 connected; no policy command will be sent before Start/A sequence")
 
     def _initialize_command(self, command):
         command.head[0] = 0xFE
@@ -252,12 +278,17 @@ class FixedHIMLocoController:
             motor.tau = 0.0
 
     def _low_state_callback(self, message):
+        received_at = time.monotonic()
         try:
             keys = decode_remote_keys(message.wireless_remote)
         except (AttributeError, TypeError, ValueError):
             keys = 0
         with self.snapshot_lock:
-            self.snapshot = LowStateSnapshot(message, time.monotonic(), keys)
+            if self.last_lowstate_rx > 0.0:
+                self.lowstate_intervals.append(received_at - self.last_lowstate_rx)
+            self.last_lowstate_rx = received_at
+            self.lowstate_rx_count += 1
+            self.snapshot = LowStateSnapshot(message, received_at, keys)
 
     def _snapshot(self):
         with self.snapshot_lock:
@@ -317,38 +348,161 @@ class FixedHIMLocoController:
         self.him_obs.record_action(torch.from_numpy(np.clip(action, -ACTION_CLIP, ACTION_CLIP)).reshape(1, 12))
         return action
 
-    def run(self):
-        self.state = RuntimeState.WAIT_FOR_ARM
-        print("[safety] WAIT_FOR_ARM: press A to arm; Select=STOP; B=ESTOP; Ctrl+C=STOP")
+    def _check_runtime_safety(self, snapshot):
+        if not self.watchdog.fresh(snapshot.received_at):
+            raise SafetyError(f"LowState stale during {self.state.value}")
+        if key_pressed(snapshot.remote_keys, self.ESTOP_KEY):
+            raise SafetyError("wireless ESTOP")
+        if key_pressed(snapshot.remote_keys, self.STOP_KEY):
+            raise SafetyError("wireless STOP")
+
+    def _set_pose_command(self, target_policy, kp, kd):
+        target_policy = np.asarray(target_policy, dtype=np.float32).reshape(-1)
+        if target_policy.shape != (12,) or not np.isfinite(target_policy).all():
+            raise SafetyError("pose target must be a finite 12-vector")
+        for policy_index, motor_index in enumerate(POLICY_TO_MOTOR):
+            motor = self.low_cmd.motor_cmd[motor_index]
+            motor.q = float(target_policy[policy_index])
+            motor.dq = 0.0
+            motor.kp = float(kp)
+            motor.kd = float(kd)
+            motor.tau = 0.0
+
+    def _set_zero_torque_command(self):
+        for motor in self.low_cmd.motor_cmd:
+            motor.q = 2.146e9
+            motor.dq = 16000.0
+            motor.kp = 0.0
+            motor.kd = 0.0
+            motor.tau = 0.0
+
+    def _send_timed_pose_command(self, target_policy, kp, kd):
+        start = time.monotonic()
+        self._set_pose_command(target_policy, kp, kd)
+        publish_start = time.monotonic()
+        self._send(self.low_cmd)
+        self.last_publish_ms = (time.monotonic() - publish_start) * 1000.0
+        self.loop_durations.append(time.monotonic() - start)
+
+    def _wait_for_pose_arm(self):
+        self.state = RuntimeState.WAIT_FOR_POSE_ARM
+        print("[safety] WAIT_FOR_POSE_ARM: press Start to begin pose transition; Select=STOP; B=ESTOP; Ctrl+C=STOP")
         wait_deadline = time.monotonic() + ARM_WAIT_TIMEOUT
         while True:
             snapshot = self._snapshot()
             if not self.watchdog.fresh(snapshot.received_at):
                 if time.monotonic() >= wait_deadline:
-                    raise SafetyError(f"no fresh LowState received within {ARM_WAIT_TIMEOUT:.1f}s before ARM")
-                time.sleep(0.02)
+                    raise SafetyError(f"no fresh LowState received within {ARM_WAIT_TIMEOUT:.1f}s before pose transition")
+                time.sleep(CONTROL_DT)
                 continue
-            if key_pressed(snapshot.remote_keys, self.ESTOP_KEY):
-                raise SafetyError("wireless ESTOP before ARM")
-            if key_pressed(snapshot.remote_keys, self.ARM_KEY):
-                self.state = RuntimeState.ACTIVE
-                print(f"[safety] ACTIVE command={self.args.command.as_array().tolist()}")
-                break
-            time.sleep(0.02)
+            self._check_runtime_safety(snapshot)
+            if key_pressed(snapshot.remote_keys, self.POSE_ARM_KEY):
+                return snapshot
+            self._set_zero_torque_command()
+            self._send(self.low_cmd)
+            time.sleep(CONTROL_DT)
+
+    def _move_to_default_pos(self, initial_q):
+        self.state = RuntimeState.POSE_TRANSITION
+        initial_q = np.asarray(initial_q, dtype=np.float32).reshape(12)
+        max_error = float(np.max(np.abs(initial_q - DEFAULT_ANGLES)))
+        print(f"[safety] POSE_TRANSITION_START max_initial_joint_error={max_error:.6f}")
+        steps = max(2, int(round(POSE_TRANSITION_DURATION / CONTROL_DT)))
+        next_tick = time.monotonic()
+        for step in range(steps):
+            snapshot = self._snapshot()
+            self._check_runtime_safety(snapshot)
+            target = pose_transition_target(initial_q, step, steps)
+            self._send_timed_pose_command(target, POSE_KP, POSE_KD)
+            next_tick += CONTROL_DT
+            sleep_time = next_tick - time.monotonic()
+            if sleep_time > 0.0:
+                time.sleep(sleep_time)
+            else:
+                next_tick = time.monotonic()
+        print("[safety] POSE_TRANSITION_COMPLETE")
+
+    def _wait_for_policy_arm(self):
+        self.state = RuntimeState.DEFAULT_POSE_HOLD
+        print("[safety] DEFAULT_POSE_HOLD: press A for policy; Select=STOP; B=ESTOP; Ctrl+C=STOP")
+        released = False
+        next_tick = time.monotonic()
+        while True:
+            snapshot = self._snapshot()
+            self._check_runtime_safety(snapshot)
+            self._send_timed_pose_command(DEFAULT_ANGLES, POSE_KP, POSE_KD)
+            self.state = RuntimeState.WAIT_FOR_POLICY_ARM
+            if not key_pressed(snapshot.remote_keys, self.ARM_KEY):
+                released = True
+            elif released:
+                return snapshot
+            next_tick += CONTROL_DT
+            sleep_time = next_tick - time.monotonic()
+            if sleep_time > 0.0:
+                time.sleep(sleep_time)
+            else:
+                next_tick = time.monotonic()
+
+    def _initialize_policy_history(self, snapshot, command):
+        gyro, gravity, q_policy, dq_policy = self._prepare_sensor(snapshot.message)
+        build_observation(
+            self.him_obs,
+            command.as_array(),
+            gyro,
+            gravity,
+            q_policy,
+            dq_policy,
+            repeat_history=True,
+        )
+        print("[safety] HISTORY_INIT_SOURCE=latest_default_pose_lowstate PREVIOUS_ACTION_INIT=zeros")
+
+    def _print_diagnostics(self, now):
+        if now - self._last_summary < 1.0:
+            return
+        self._last_summary = now
+        with self.snapshot_lock:
+            rx_count = self.lowstate_rx_count
+            intervals = np.asarray(self.lowstate_intervals, dtype=np.float64)
+            age_ms = (now - self.snapshot.received_at) * 1000.0
+        if intervals.size:
+            rx_rate = 1.0 / float(np.median(intervals))
+            p50 = float(np.percentile(intervals, 50) * 1000.0)
+            p95 = float(np.percentile(intervals, 95) * 1000.0)
+        else:
+            rx_rate, p50, p95 = 0.0, 0.0, 0.0
+        loops = np.asarray(self.loop_durations, dtype=np.float64)
+        loop_p95 = float(np.percentile(loops, 95) * 1000.0) if loops.size else 0.0
+        print(
+            "[diagnostics] state=%s lowstate_rx=%d lowstate_rate_hz=%.1f "
+            "rx_p50_ms=%.2f rx_p95_ms=%.2f age_ms=%.2f policy_ms=%.2f "
+            "publish_ms=%.2f loop_p95_ms=%.2f"
+            % (self.state.value, rx_count, rx_rate, p50, p95, age_ms,
+               self.last_policy_ms, self.last_publish_ms, loop_p95)
+        )
+
+    def run(self):
+        pose_snapshot = self._wait_for_pose_arm()
+        _, _, initial_q, _ = self._prepare_sensor(pose_snapshot.message)
+        self._move_to_default_pos(initial_q)
+        policy_snapshot = self._wait_for_policy_arm()
+        self._initialize_policy_history(policy_snapshot, self.args.command)
+        self.state = RuntimeState.ACTIVE
+        print(f"[safety] ACTIVE command={self.args.command.as_array().tolist()}")
 
         next_tick = time.monotonic()
         while self.state == RuntimeState.ACTIVE:
+            loop_start = time.monotonic()
             next_tick += CONTROL_DT
             snapshot = self._snapshot()
-            if not self.watchdog.fresh(snapshot.received_at):
-                raise SafetyError("LowState stale during ACTIVE")
-            if key_pressed(snapshot.remote_keys, self.ESTOP_KEY):
-                raise SafetyError("wireless ESTOP")
-            if key_pressed(snapshot.remote_keys, self.STOP_KEY):
-                self.state = RuntimeState.STOPPING
-                break
+            self._check_runtime_safety(snapshot)
+            policy_start = time.monotonic()
             self._run_policy_once(self.args.command, snapshot)
+            self.last_policy_ms = (time.monotonic() - policy_start) * 1000.0
+            publish_start = time.monotonic()
             self._send(self.low_cmd)
+            self.last_publish_ms = (time.monotonic() - publish_start) * 1000.0
+            self.loop_durations.append(time.monotonic() - loop_start)
+            self._print_diagnostics(time.monotonic())
             sleep_time = next_tick - time.monotonic()
             if sleep_time > 0:
                 time.sleep(sleep_time)

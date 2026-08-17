@@ -15,7 +15,15 @@ class HIMLocoObservation:
         self.history.reset()
         self.previous_action.zero_()
 
-    def build(self, command, angular_velocity, gravity, joint_position, joint_velocity):
+    def build(
+        self,
+        command,
+        angular_velocity,
+        gravity,
+        joint_position,
+        joint_velocity,
+        repeat_history=False,
+    ):
         command_scaled = command * torch.tensor([2.0, 2.0, 0.25], device=self.device)
         q_scaled = joint_position * 1.0
         dq_scaled = joint_velocity * 0.05
@@ -27,7 +35,7 @@ class HIMLocoObservation:
             raise RuntimeError(f"HIMLoco frame must be (1,45), got {tuple(frame.shape)}")
         if not torch.isfinite(frame).all():
             raise FloatingPointError("HIMLoco observation contains NaN or Inf")
-        observation = self.history.push(frame)
+        observation = self.history.push(frame, repeat_on_first=repeat_history)
         if tuple(observation.shape) != (1, 270):
             raise RuntimeError(f"HIMLoco observation must be (1,270), got {tuple(observation.shape)}")
         return observation

@@ -23,6 +23,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     SafetyError,
     build_observation,
     build_target_q,
+    pose_transition_target,
     projected_gravity_from_wxyz,
     sha256_file,
     validate_fixed_command,
@@ -51,6 +52,17 @@ def test_fixed_observation_is_270_and_newest_first():
     assert torch.count_nonzero(observation[0, 45:]) == 0
 
 
+def test_policy_history_can_be_primed_from_latest_pose():
+    him = HIMLocoObservation(torch.device("cpu"))
+    observation = build_observation(
+        him, [0.1, 0.0, 0.1], [0.01, 0.02, 0.03], [0.0, 0.0, -1.0],
+        DEFAULT_ANGLES + 0.01, [0.1] * 12, repeat_history=True,
+    )
+    frames = observation.reshape(1, 6, 45)
+    for index in range(1, 6):
+        torch.testing.assert_close(frames[:, 0], frames[:, index])
+
+
 def test_joint_mapping_and_target_contract():
     assert POLICY_TO_MOTOR == (3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8)
     action = np.arange(12, dtype=np.float32)
@@ -58,6 +70,19 @@ def test_joint_mapping_and_target_contract():
     assert KP == 20.0
     assert KD == 0.5
     np.testing.assert_allclose(COMMAND_SCALE, [2.0, 2.0, 0.25])
+
+
+def test_pose_transition_starts_at_current_and_ends_at_default():
+    initial = DEFAULT_ANGLES + np.linspace(-0.2, 0.2, 12, dtype=np.float32)
+    first = pose_transition_target(initial, 0, 100)
+    last = pose_transition_target(initial, 99, 100)
+    np.testing.assert_allclose(first, initial)
+    np.testing.assert_allclose(last, DEFAULT_ANGLES)
+    previous = first
+    for step in range(1, 100):
+        current = pose_transition_target(initial, step, 100)
+        assert np.max(np.abs(current - previous)) < 0.01
+        previous = current
 
 
 @pytest.mark.parametrize("command", [(0.0, 0.0, 0.0), (0.15, 0.0, 0.0), (0.0, 0.0, 0.15), (0.0, 0.0, -0.15)])
@@ -108,14 +133,41 @@ def test_stop_transitions_to_exit_without_transport():
 def test_lowstate_subscriber_is_retained_by_controller():
     source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
     assert "self.lowstate_subscriber = ChannelSubscriber" in source
-    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
     assert ARM_WAIT_TIMEOUT == 5.0
     assert "no fresh LowState received within" in source
 
 
-def test_wait_for_arm_keeps_waiting_after_first_fresh_lowstate():
+def test_startup_sequence_has_pose_transition_and_policy_gate():
     source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
-    wait_block = source.split("        wait_deadline =", 1)[1].split("        next_tick =", 1)[0]
+    assert "POSE_TRANSITION_START" in source
+    assert "POSE_TRANSITION_COMPLETE" in source
+    assert "DEFAULT_POSE_HOLD" in source
+    assert "HISTORY_INIT_SOURCE=latest_default_pose_lowstate" in source
+    assert "repeat_history=True" in source
+    transition = source.split("    def _move_to_default_pos", 1)[1].split("    def _wait_for_policy_arm", 1)[0]
+    assert "self.policy" not in transition
+
+
+def test_lowstate_callback_updates_thread_safe_receive_metrics():
+    class Message:
+        wireless_remote = bytes(24)
+
+    controller = object.__new__(FixedHIMLocoController)
+    controller.snapshot_lock = __import__("threading").RLock()
+    controller.snapshot = type("Snapshot", (), {})()
+    controller.last_lowstate_rx = 0.0
+    controller.lowstate_rx_count = 0
+    controller.lowstate_intervals = []
+    controller._low_state_callback(Message())
+    assert controller.lowstate_rx_count == 1
+    assert controller.snapshot.message.__class__ is Message
+    assert controller.snapshot.received_at > 0.0
+
+
+def test_wait_for_pose_arm_keeps_waiting_after_first_fresh_lowstate():
+    source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
+    wait_block = source.split("    def _wait_for_pose_arm", 1)[1].split("    def _move_to_default_pos", 1)[0]
     assert "if not self.watchdog.fresh" in wait_block
     assert "continue" in wait_block
-    assert "if key_pressed(snapshot.remote_keys, self.ARM_KEY)" in wait_block
+    assert "if key_pressed(snapshot.remote_keys, self.POSE_ARM_KEY)" in wait_block
