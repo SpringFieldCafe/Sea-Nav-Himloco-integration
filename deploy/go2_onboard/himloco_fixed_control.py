@@ -30,6 +30,12 @@ from .joint_mapping import make_policy_to_motor
 
 DEFAULT_POLICY = "models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt"
 EXPECTED_SHA256 = "cab2489dda7732a7d6f51595aa6362384445c738537d0c1c91569054c7b9f5d1"
+LEGACY_POLICY_1_SHA256 = "456218effd3a4befdbcd54f85c4474c1aa282df1dd81894bd7761543c18dd11a"
+APPROVED_POLICIES = {
+    "himloco_1460": EXPECTED_SHA256,
+    "legacy_policy_1": LEGACY_POLICY_1_SHA256,
+}
+APPROVED_POLICY_PROFILES = {sha256: profile for profile, sha256 in APPROVED_POLICIES.items()}
 EXPECTED_INPUT_DIM = 270
 EXPECTED_OUTPUT_DIM = 12
 CONTROL_HZ = 50.0
@@ -383,8 +389,12 @@ class FixedHIMLocoController:
         if not path.is_file():
             raise SafetyError(f"HIMLoco model does not exist: {path}")
         actual = sha256_file(str(path))
-        if actual != EXPECTED_SHA256:
-            raise SafetyError(f"model SHA256 mismatch: expected {EXPECTED_SHA256}, got {actual}")
+        profile = APPROVED_POLICY_PROFILES.get(actual)
+        if profile is None:
+            approved = ", ".join(sorted(APPROVED_POLICIES.values()))
+            raise SafetyError(
+                f"model SHA256 is not approved: got {actual}; approved hashes: {approved}"
+            )
         self.policy = torch.jit.load(str(path), map_location="cpu").eval()
         with torch.inference_mode():
             probe = torch.zeros((1, EXPECTED_INPUT_DIM), dtype=torch.float32)
@@ -398,6 +408,8 @@ class FixedHIMLocoController:
                 warmup_output = self.policy(probe)
         if not torch.isfinite(warmup_output).all():
             raise SafetyError("model warm-up returned NaN/Inf")
+        self.policy_profile = profile
+        print(f"[model] policy_profile={profile}")
         print(f"[model] path={path}")
         print(f"[model] sha256={actual} input=270 output=12 warmup={POLICY_WARMUP_STEPS}")
 
@@ -963,7 +975,7 @@ def projected_gravity_from_wxyz(quaternion: Sequence[float]) -> np.ndarray:
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="HIMLoco 1460 fixed-command Go2 controller")
+    parser = argparse.ArgumentParser(description="Approved HIMLoco fixed-command Go2 controller")
     parser.add_argument("net", help="Ethernet interface, e.g. enp3s0")
     parser.add_argument("--policy", default=DEFAULT_POLICY)
     parser.add_argument("--vx", type=float, required=True)

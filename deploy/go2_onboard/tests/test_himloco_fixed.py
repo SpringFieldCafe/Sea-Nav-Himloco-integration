@@ -1,4 +1,5 @@
 import ast
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +8,7 @@ import torch
 
 from deploy.go2_onboard.himloco_fixed_control import (
     ACTION_SCALE,
+    APPROVED_POLICIES,
     COMMAND_SCALE,
     DEFAULT_ANGLES,
     EXPECTED_INPUT_DIM,
@@ -16,6 +18,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     ARM_WAIT_TIMEOUT,
     POLICY_WARMUP_STEPS,
     KD,
+    LEGACY_POLICY_1_SHA256,
     KP,
     POLICY_TO_MOTOR,
     LowStateWatchdog,
@@ -43,6 +46,61 @@ def test_current_1460_hash_and_shape():
         output = policy(torch.zeros((1, EXPECTED_INPUT_DIM)))
     assert tuple(output.shape) == (1, EXPECTED_OUTPUT_DIM)
     assert POLICY_WARMUP_STEPS == 10
+
+
+def test_approved_policy_allowlist_contains_only_two_named_hashes():
+    assert APPROVED_POLICIES == {
+        "himloco_1460": EXPECTED_SHA256,
+        "legacy_policy_1": LEGACY_POLICY_1_SHA256,
+    }
+
+
+@pytest.mark.parametrize(
+    ("profile", "path", "expected_sha"),
+    [
+        (
+            "himloco_1460",
+            "models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt",
+            EXPECTED_SHA256,
+        ),
+        ("legacy_policy_1", "models/locomotion/himloco/policy_1.pt", LEGACY_POLICY_1_SHA256),
+    ],
+)
+def test_approved_policy_sha_and_shape_pass(profile, path, expected_sha, capsys):
+    controller = object.__new__(FixedHIMLocoController)
+    controller.args = SimpleNamespace(policy=path)
+    controller.validate_model()
+    assert controller.policy_profile == profile
+    assert sha256_file(path) == expected_sha
+    assert "input=270 output=12" in capsys.readouterr().out
+
+
+def test_unknown_sha_fails_before_lowcmd_transport(monkeypatch):
+    controller = object.__new__(FixedHIMLocoController)
+    controller.args = SimpleNamespace(policy="models/locomotion/himloco/policy_1.pt")
+    monkeypatch.setattr(
+        "deploy.go2_onboard.himloco_fixed_control.sha256_file",
+        lambda _: "0" * 64,
+    )
+    with pytest.raises(SafetyError, match="not approved"):
+        controller.validate_model()
+    assert not hasattr(controller, "publisher")
+    assert not hasattr(controller, "low_cmd")
+
+
+def test_approved_hash_with_wrong_shape_fails(monkeypatch, tmp_path):
+    wrong_policy = tmp_path / "wrong_shape.pt"
+    module = torch.nn.Linear(EXPECTED_INPUT_DIM, EXPECTED_OUTPUT_DIM - 1)
+    traced = torch.jit.trace(module.eval(), torch.zeros((1, EXPECTED_INPUT_DIM)))
+    traced.save(str(wrong_policy))
+    controller = object.__new__(FixedHIMLocoController)
+    controller.args = SimpleNamespace(policy=str(wrong_policy))
+    monkeypatch.setattr(
+        "deploy.go2_onboard.himloco_fixed_control.sha256_file",
+        lambda _: EXPECTED_SHA256,
+    )
+    with pytest.raises(SafetyError, match="270->12"):
+        controller.validate_model()
 
 
 def test_fixed_observation_is_270_and_newest_first():
