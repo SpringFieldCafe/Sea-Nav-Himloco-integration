@@ -130,3 +130,66 @@ python -c 'import torch; print(torch.__version__, torch.cuda.is_available(), tor
 exist, the wireless mapping, fresh-state gate, explicit arm gate, 50 Hz health
 gate, conflict check, and exception/timeout shutdown path must be reviewed in a
 separate change. No real command path is present here.
+
+## SEA-Nav plus HIMLoco 1460 navigation entry
+
+The first navigation entry keeps the existing guarded HIMLoco low-level
+controller and starts SEA-Nav in a separate process. The ROS sensor bridge is
+still the only process that reads ROS/DDS sensors. The navigation worker reads
+the one-way Unix socket at a low rate, applies the first-milestone limits
+(`vx=[0,0.15]`, `vy=0`, `wz=[-0.15,0.15]`), and publishes only the latest command
+to the 50 Hz HIMLoco loop. A stale worker result is replaced with zero; the
+last non-zero command is never held indefinitely.
+
+The entry requires the approved HIMLoco 1460 hash and the approved peer SEA-Nav
+550->3 export. It requires zero fixed-command placeholders because navigation
+is the only command source:
+
+Terminal A, with ROS 2 Humble and the existing read-only sensor bridge:
+
+```bash
+cd /home/hyz/桌面/sea_nav
+source /opt/ros/humble/setup.bash
+source /home/hyz/unitree_msgs_humble_ws/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI='<CycloneDDS><Domain Id="any"><General><Interfaces><NetworkInterface name="enp3s0" priority="default" multicast="default" /></Interfaces></General></Domain></CycloneDDS>'
+export ROS_DOMAIN_ID=0
+export ROS_LOCALHOST_ONLY=0
+
+/usr/bin/python3 -m deploy.go2_onboard.sensor_bridge \
+  --duration 15 --control-hz 50 --summary-interval 1 \
+  --lowstate-max-age 0.10 --odom-max-age 0.10 --lidar-max-age 0.20 \
+  --goal-topic '' --goal-frame odom \
+  --goal-x GOAL_X --goal-y GOAL_Y \
+  --socket /tmp/sea_nav_shadow.sock \
+  --log logs/go2_navigation/sensor_bridge.jsonl
+```
+
+Terminal B, started after Terminal A prints `listening`:
+
+```bash
+cd /home/hyz/桌面/sea_nav
+conda activate himloco
+
+python -m deploy.go2_onboard.sea_nav_himloco_navigation \
+  enp3s0 \
+  --policy models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt \
+  --vx 0 --vy 0 --wz 0 \
+  --goal-x GOAL_X --goal-y GOAL_Y \
+  --sensor-socket /tmp/sea_nav_shadow.sock \
+  --navigation-policy artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt \
+  --navigation-metadata artifacts/go2_onboard/sea_nav_policy_peer_model_2000.json \
+  --navigation-hz 10 \
+  --navigation-command-max-age 0.25 \
+  --navigation-filter-alpha 0.15 \
+  --max-sensor-age 0.10 \
+  --navigation-log logs/go2_navigation/navigation.jsonl \
+  --event-trace /tmp/sea_nav_navigation_event_trace.jsonl
+```
+
+`GOAL_X` and `GOAL_Y` are placeholders for a goal already expressed in the
+`odom` frame. This command is documentation only; the navigation controller
+has not been run on a real Go2 in this milestone. The normal Start -> pose
+transition -> default-pose hold -> A arm sequence, performance-governor gate,
+motion-owner check, wireless STOP/ESTOP, LowState watchdog, and Ctrl+C stop
+path remain owned by `himloco_fixed_control.py`.
