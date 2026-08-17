@@ -28,6 +28,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     projected_gravity_from_wxyz,
     sha256_file,
     validate_fixed_command,
+    advance_deadline,
 )
 from deploy.go2_onboard.himloco_observation import HIMLocoObservation
 
@@ -164,6 +165,20 @@ def test_comm_only_mode_skips_policy_load_and_execution():
     assert "--comm-only" in source
     assert "if not args.comm_only:" in source
     assert "controller.run_comm_only()" in source
+
+
+def test_absolute_deadline_does_not_add_work_time_and_resyncs_overrun():
+    next_tick, sleep_time = advance_deadline(0.0, 0.002)
+    assert next_tick == pytest.approx(0.02)
+    assert sleep_time == pytest.approx(0.018)
+
+    next_tick, sleep_time = advance_deadline(next_tick, 0.022)
+    assert next_tick == pytest.approx(0.04)
+    assert sleep_time == pytest.approx(0.018)
+
+    next_tick, sleep_time = advance_deadline(next_tick, 0.105)
+    assert next_tick == pytest.approx(0.105)
+    assert sleep_time == 0.0
 
 
 def test_realtime_torch_defaults_are_single_threaded():

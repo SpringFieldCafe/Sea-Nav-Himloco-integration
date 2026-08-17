@@ -9,6 +9,7 @@ checks pass.  No SEA-Nav or ROS2 control path is involved.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import struct
@@ -137,6 +138,15 @@ def pose_transition_target(initial_q: Sequence[float], step: int, steps: int) ->
     return initial_q * (1.0 - alpha) + DEFAULT_ANGLES * alpha
 
 
+def advance_deadline(next_tick: float, now: float, period: float = CONTROL_DT):
+    """Advance an absolute deadline and resync after an overrun."""
+    next_tick += period
+    sleep_time = next_tick - now
+    if sleep_time > 0.0:
+        return next_tick, sleep_time
+    return now, 0.0
+
+
 def build_observation(
     him_obs: HIMLocoObservation,
     command: Sequence[float],
@@ -222,6 +232,11 @@ class FixedHIMLocoController:
         self.deadline_miss_count = 0
         self.event_trace = deque(maxlen=256)
         self.event_trace_dumped = False
+        self.heartbeat_stop = threading.Event()
+        self.heartbeat_intervals = deque(maxlen=512)
+        self.heartbeat_thread = None
+        self.gc_events = deque(maxlen=32)
+        self.gc_callback_registered = False
         self._last_summary = 0.0
 
     def _record_event(self, event, **fields):
@@ -248,6 +263,9 @@ class FixedHIMLocoController:
                 "reason": reason,
                 "lowstate_age_ms": age_ms,
                 "lowstate_rx_count": self.lowstate_rx_count,
+                "heartbeat_max_gap_ms": self._heartbeat_max_gap_ms(),
+                "gc_counts": list(gc.get_count()),
+                "gc_events": list(self.gc_events),
             })
             with path.open("w", encoding="utf-8") as handle:
                 for record in records:
@@ -255,6 +273,55 @@ class FixedHIMLocoController:
             print(f"[diagnostics] event_trace_dump={path} events={len(records)}")
         except Exception as exc:
             print(f"[diagnostics] event_trace_dump_failed={exc}")
+
+    def _on_gc_event(self, phase, info):
+        self.gc_events.append({
+            "phase": phase,
+            "generation": int(info.get("generation", -1)),
+            "monotonic": time.monotonic(),
+        })
+
+    def _start_diagnostics(self):
+        if not self.gc_callback_registered:
+            gc.callbacks.append(self._on_gc_event)
+            self.gc_callback_registered = True
+        self.heartbeat_stop.clear()
+        self.heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="himloco-heartbeat",
+            daemon=True,
+        )
+        self.heartbeat_thread.start()
+
+    def _stop_diagnostics(self):
+        heartbeat_stop = getattr(self, "heartbeat_stop", None)
+        if heartbeat_stop is not None:
+            heartbeat_stop.set()
+        heartbeat_thread = getattr(self, "heartbeat_thread", None)
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=0.2)
+            self.heartbeat_thread = None
+        if getattr(self, "gc_callback_registered", False):
+            try:
+                gc.callbacks.remove(self._on_gc_event)
+            except ValueError:
+                pass
+            self.gc_callback_registered = False
+
+    def _heartbeat_loop(self):
+        previous = time.monotonic()
+        while not self.heartbeat_stop.wait(0.005):
+            current = time.monotonic()
+            self.heartbeat_intervals.append(current - previous)
+            previous = current
+
+    def _heartbeat_max_gap_ms(self):
+        if not self.heartbeat_intervals:
+            return 0.0
+        return max(self.heartbeat_intervals) * 1000.0
+
+    def _cycle_event(self, event, **fields):
+        self._record_event(event, **fields)
 
     def validate_model(self):
         path = Path(self.args.policy).resolve()
@@ -323,6 +390,7 @@ class FixedHIMLocoController:
         # keeps Python callback work out of CycloneDDS's listener thread.
         self.lowstate_subscriber.Init(self._low_state_callback, 10)
         self._initialize_command(self.low_cmd)
+        self._start_diagnostics()
         print("[safety] SDK2 connected; no policy command will be sent before Start/A sequence")
 
     def _initialize_command(self, command):
@@ -369,7 +437,17 @@ class FixedHIMLocoController:
         if self.publisher is None:
             raise SafetyError("publisher is not initialized")
         send_start = time.monotonic()
+        self._record_event("send_start", send_start_monotonic=send_start)
+        crc_start = time.monotonic()
+        self._record_event("crc_start", crc_start_monotonic=crc_start)
         command.crc = self._sdk[-1]().Crc(command)
+        crc_end = time.monotonic()
+        self._record_event(
+            "crc_end",
+            crc_start_monotonic=crc_start,
+            crc_end_monotonic=crc_end,
+            crc_duration_ms=(crc_end - crc_start) * 1000.0,
+        )
         write_start = time.monotonic()
         self._record_event("write_start", write_start_monotonic=write_start)
         self.publisher.Write(command)
@@ -379,6 +457,12 @@ class FixedHIMLocoController:
             write_start_monotonic=write_start,
             write_end_monotonic=write_end,
             write_duration_ms=(write_end - write_start) * 1000.0,
+            send_duration_ms=(write_end - send_start) * 1000.0,
+        )
+        self._record_event(
+            "send_end",
+            send_start_monotonic=send_start,
+            send_end_monotonic=write_end,
             send_duration_ms=(write_end - send_start) * 1000.0,
         )
         self.sent_any_command = True
@@ -506,16 +590,56 @@ class FixedHIMLocoController:
         steps = max(2, int(round(POSE_TRANSITION_DURATION / CONTROL_DT)))
         next_tick = time.monotonic()
         for step in range(steps):
+            loop_start = time.monotonic()
+            self._cycle_event("loop_start", loop_start_monotonic=loop_start)
+            snapshot_start = time.monotonic()
+            self._cycle_event("snapshot_start", snapshot_start_monotonic=snapshot_start)
             snapshot = self._snapshot()
+            snapshot_end = time.monotonic()
+            self._cycle_event(
+                "snapshot_end",
+                snapshot_start_monotonic=snapshot_start,
+                snapshot_end_monotonic=snapshot_end,
+                snapshot_duration_ms=(snapshot_end - snapshot_start) * 1000.0,
+            )
+            safety_start = time.monotonic()
+            self._cycle_event("safety_start", safety_start_monotonic=safety_start)
             self._check_runtime_safety(snapshot)
+            safety_end = time.monotonic()
+            self._cycle_event(
+                "safety_end",
+                safety_start_monotonic=safety_start,
+                safety_end_monotonic=safety_end,
+                safety_duration_ms=(safety_end - safety_start) * 1000.0,
+            )
+            target_start = time.monotonic()
+            self._cycle_event("target_compute_start", target_start_monotonic=target_start)
             target = pose_transition_target(initial_q, step, steps)
+            target_end = time.monotonic()
+            self._cycle_event(
+                "target_compute_end",
+                target_start_monotonic=target_start,
+                target_end_monotonic=target_end,
+                target_compute_duration_ms=(target_end - target_start) * 1000.0,
+            )
             self._send_timed_pose_command(target, POSE_KP, POSE_KD)
-            next_tick += CONTROL_DT
-            sleep_time = next_tick - time.monotonic()
+            sleep_start = time.monotonic()
+            next_tick, sleep_time = advance_deadline(next_tick, sleep_start)
+            self._cycle_event(
+                "sleep_start",
+                sleep_start_monotonic=sleep_start,
+                sleep_requested_ms=sleep_time * 1000.0,
+            )
             if sleep_time > 0.0:
                 time.sleep(sleep_time)
-            else:
-                next_tick = time.monotonic()
+            sleep_end = time.monotonic()
+            self._cycle_event(
+                "sleep_end",
+                sleep_start_monotonic=sleep_start,
+                sleep_end_monotonic=sleep_end,
+                sleep_actual_ms=(sleep_end - sleep_start) * 1000.0,
+            )
+            self._cycle_event("loop_end", loop_start_monotonic=loop_start, loop_end_monotonic=sleep_end)
         print("[safety] POSE_TRANSITION_COMPLETE")
 
     def _wait_for_policy_arm(self):
@@ -524,20 +648,60 @@ class FixedHIMLocoController:
         released = False
         next_tick = time.monotonic()
         while True:
+            loop_start = time.monotonic()
+            self._cycle_event("loop_start", loop_start_monotonic=loop_start)
+            snapshot_start = time.monotonic()
+            self._cycle_event("snapshot_start", snapshot_start_monotonic=snapshot_start)
             snapshot = self._snapshot()
+            snapshot_end = time.monotonic()
+            self._cycle_event(
+                "snapshot_end",
+                snapshot_start_monotonic=snapshot_start,
+                snapshot_end_monotonic=snapshot_end,
+                snapshot_duration_ms=(snapshot_end - snapshot_start) * 1000.0,
+            )
+            safety_start = time.monotonic()
+            self._cycle_event("safety_start", safety_start_monotonic=safety_start)
             self._check_runtime_safety(snapshot)
+            safety_end = time.monotonic()
+            self._cycle_event(
+                "safety_end",
+                safety_start_monotonic=safety_start,
+                safety_end_monotonic=safety_end,
+                safety_duration_ms=(safety_end - safety_start) * 1000.0,
+            )
+            target_start = time.monotonic()
+            self._cycle_event("target_compute_start", target_start_monotonic=target_start)
+            target_end = time.monotonic()
+            self._cycle_event(
+                "target_compute_end",
+                target_start_monotonic=target_start,
+                target_end_monotonic=target_end,
+                target_compute_duration_ms=(target_end - target_start) * 1000.0,
+            )
             self._send_timed_pose_command(DEFAULT_ANGLES, POSE_KP, POSE_KD)
             self.state = RuntimeState.WAIT_FOR_POLICY_ARM
             if not key_pressed(snapshot.remote_keys, self.ARM_KEY):
                 released = True
             elif released:
                 return snapshot
-            next_tick += CONTROL_DT
-            sleep_time = next_tick - time.monotonic()
+            sleep_start = time.monotonic()
+            next_tick, sleep_time = advance_deadline(next_tick, sleep_start)
+            self._cycle_event(
+                "sleep_start",
+                sleep_start_monotonic=sleep_start,
+                sleep_requested_ms=sleep_time * 1000.0,
+            )
             if sleep_time > 0.0:
                 time.sleep(sleep_time)
-            else:
-                next_tick = time.monotonic()
+            sleep_end = time.monotonic()
+            self._cycle_event(
+                "sleep_end",
+                sleep_start_monotonic=sleep_start,
+                sleep_end_monotonic=sleep_end,
+                sleep_actual_ms=(sleep_end - sleep_start) * 1000.0,
+            )
+            self._cycle_event("loop_end", loop_start_monotonic=loop_start, loop_end_monotonic=sleep_end)
 
     def _initialize_policy_history(self, snapshot, command):
         gyro, gravity, q_policy, dq_policy = self._prepare_sensor(snapshot.message)
@@ -654,11 +818,9 @@ class FixedHIMLocoController:
             if lateness > 0.0:
                 self.deadline_miss_count += 1
             self._print_diagnostics(time.monotonic())
-            sleep_time = next_tick - time.monotonic()
+            next_tick, sleep_time = advance_deadline(next_tick, time.monotonic())
             if sleep_time > 0:
                 time.sleep(sleep_time)
-            else:
-                next_tick = time.monotonic()
         self.stop()
 
     def run_comm_only(self):
@@ -674,15 +836,55 @@ class FixedHIMLocoController:
         end_time = time.monotonic() + self.args.comm_only_duration
         next_tick = time.monotonic()
         while time.monotonic() < end_time:
+            loop_start = time.monotonic()
+            self._cycle_event("loop_start", loop_start_monotonic=loop_start)
+            snapshot_start = time.monotonic()
+            self._cycle_event("snapshot_start", snapshot_start_monotonic=snapshot_start)
             snapshot = self._snapshot()
+            snapshot_end = time.monotonic()
+            self._cycle_event(
+                "snapshot_end",
+                snapshot_start_monotonic=snapshot_start,
+                snapshot_end_monotonic=snapshot_end,
+                snapshot_duration_ms=(snapshot_end - snapshot_start) * 1000.0,
+            )
+            safety_start = time.monotonic()
+            self._cycle_event("safety_start", safety_start_monotonic=safety_start)
             self._check_runtime_safety(snapshot)
+            safety_end = time.monotonic()
+            self._cycle_event(
+                "safety_end",
+                safety_start_monotonic=safety_start,
+                safety_end_monotonic=safety_end,
+                safety_duration_ms=(safety_end - safety_start) * 1000.0,
+            )
+            target_start = time.monotonic()
+            self._cycle_event("target_compute_start", target_start_monotonic=target_start)
+            target_end = time.monotonic()
+            self._cycle_event(
+                "target_compute_end",
+                target_start_monotonic=target_start,
+                target_end_monotonic=target_end,
+                target_compute_duration_ms=(target_end - target_start) * 1000.0,
+            )
             self._send_timed_pose_command(DEFAULT_ANGLES, POSE_KP, POSE_KD)
-            next_tick += CONTROL_DT
-            sleep_time = next_tick - time.monotonic()
+            sleep_start = time.monotonic()
+            next_tick, sleep_time = advance_deadline(next_tick, sleep_start)
+            self._cycle_event(
+                "sleep_start",
+                sleep_start_monotonic=sleep_start,
+                sleep_requested_ms=sleep_time * 1000.0,
+            )
             if sleep_time > 0.0:
                 time.sleep(sleep_time)
-            else:
-                next_tick = time.monotonic()
+            sleep_end = time.monotonic()
+            self._cycle_event(
+                "sleep_end",
+                sleep_start_monotonic=sleep_start,
+                sleep_end_monotonic=sleep_end,
+                sleep_actual_ms=(sleep_end - sleep_start) * 1000.0,
+            )
+            self._cycle_event("loop_end", loop_start_monotonic=loop_start, loop_end_monotonic=sleep_end)
         self.stop()
 
     def stop(self):
@@ -691,6 +893,7 @@ class FixedHIMLocoController:
             self.state = RuntimeState.DAMPING
             self._send_damping()
         finally:
+            self._stop_diagnostics()
             self.state = RuntimeState.EXIT
             print("[safety] EXIT lowcmd_sent=%s" % self.sent_any_command)
 
