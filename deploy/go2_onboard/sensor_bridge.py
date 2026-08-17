@@ -26,6 +26,17 @@ DEFAULT_FRESHNESS = {
 }
 
 
+def resolve_odom_frame(odom_frame, latest_frame, fallback=""):
+    """Resolve the stored odometry frame without masking non-empty mismatches."""
+    raw_frame = str(odom_frame or latest_frame or "")
+    if raw_frame:
+        return raw_frame, False
+    fallback = str(fallback or "")
+    if fallback:
+        return fallback, True
+    return "", False
+
+
 def duration_expired(started, duration, now):
     """Apply bridge duration only after the shadow worker has connected."""
     return started is not None and duration > 0.0 and now - started >= duration
@@ -46,6 +57,22 @@ class SensorBridge:
         if args.goal_x is not None and args.goal_y is not None:
             self.goal_manager.update(Goal2D(args.goal_frame, args.goal_x, args.goal_y, time.time()))
         self.sequence = 0
+        self._printed_first_snapshot = False
+        self._printed_fallback = False
+
+    def _odom_frame(self, odom, latest_frame):
+        frame, used_fallback = resolve_odom_frame(
+            getattr(odom, "frame_id", ""),
+            latest_frame,
+            self.args.odom_frame_fallback,
+        )
+        if used_fallback and not self._printed_fallback:
+            print(
+                "[safety] ODOM_FRAME_FALLBACK "
+                f"raw='' fallback='{self.args.odom_frame_fallback}'"
+            )
+            self._printed_fallback = True
+        return frame
 
     def snapshot(self):
         snapshot_start = time.perf_counter()
@@ -56,6 +83,8 @@ class SensorBridge:
             low = self.reader.lowstate.value
             lidar = self.reader.lidar.value
             odom = self.reader.odom.value
+            latest_odom_frame = self.reader.odom.frame_id
+            latest_odom_child_frame = self.reader.odom.child_frame_id
             goal = self.goal_manager.current
         valid = {
             "lowstate": low is not None,
@@ -89,11 +118,30 @@ class SensorBridge:
             odom_angular = odom.angular_velocity
             position = odom.position[:2]
             yaw = quat_to_yaw(low_quaternion)
-            odom_frame = odom.frame_id
+            odom_frame = self._odom_frame(odom, latest_odom_frame)
         if goal is None:
             goal_body = np.zeros(2, dtype=np.float32)
         else:
             goal_body = self.goal_manager.relative_xy(position, yaw, odom_frame, self.args.base_frame)
+        if not self._printed_first_snapshot:
+            current_goal = self.goal_manager.current
+            print(
+                "[frames] "
+                f"odom_header_frame='{odom_frame}' "
+                f"odom_child_frame='{latest_odom_child_frame}' "
+                f"goal_frame='{current_goal.frame_id if current_goal else ''}' "
+                f"base_frame='{self.args.base_frame}'"
+            )
+            if odom is not None and current_goal is not None:
+                print(
+                    "[snapshot] "
+                    f"GOAL_WORLD=[{current_goal.x:.6f},{current_goal.y:.6f}] "
+                    f"ROBOT_WORLD_XY=[{position[0]:.6f},{position[1]:.6f}] "
+                    f"ROBOT_YAW={yaw:.6f} "
+                    f"GOAL_BODY=[{goal_body[0]:.6f},{goal_body[1]:.6f}] "
+                    f"GOAL_DISTANCE={float(np.linalg.norm(goal_body)):.6f}"
+                )
+            self._printed_first_snapshot = True
         ages = health["ages"]
         packet = make_packet(
             sequence=self.sequence,
@@ -151,6 +199,12 @@ def run(args):
     last_summary = time.monotonic()
     print(f"[sensor_bridge] listening socket={args.socket}")
     print("[safety] ROS sensor reader only; no Torch, LowCmd, SportClient, or write path")
+    print(
+        "[frames] "
+        "odom_header_frame='<pending>' "
+        "odom_child_frame='<pending>' "
+        f"goal_frame='{args.goal_frame}' base_frame='{args.base_frame}'"
+    )
     try:
         while not duration_expired(started, args.duration, time.monotonic()):
             if connection is None:
@@ -257,6 +311,11 @@ def build_parser():
     parser.add_argument("--wireless-topic", default="/wirelesscontroller")
     parser.add_argument("--goal-topic", default="/sea_nav/goal2d")
     parser.add_argument("--goal-frame", default="odom")
+    parser.add_argument(
+        "--odom-frame-fallback",
+        default="",
+        help="explicit fallback only when received odometry frame_id is empty",
+    )
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--goal-x", type=float)
     parser.add_argument("--goal-y", type=float)
