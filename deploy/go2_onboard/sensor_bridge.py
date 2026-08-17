@@ -58,6 +58,7 @@ class SensorBridge:
             self.goal_manager.update(Goal2D(args.goal_frame, args.goal_x, args.goal_y, time.time()))
         self.sequence = 0
         self._printed_first_snapshot = False
+        self._printed_goal_snapshot = False
         self._printed_fallback = False
 
     def _odom_frame(self, odom, latest_frame):
@@ -119,12 +120,8 @@ class SensorBridge:
             position = odom.position[:2]
             yaw = quat_to_yaw(low_quaternion)
             odom_frame = self._odom_frame(odom, latest_odom_frame)
-        if goal is None:
-            goal_body = np.zeros(2, dtype=np.float32)
-        else:
-            goal_body = self.goal_manager.relative_xy(position, yaw, odom_frame, self.args.base_frame)
+        current_goal = self.goal_manager.current
         if not self._printed_first_snapshot:
-            current_goal = self.goal_manager.current
             print(
                 "[frames] "
                 f"odom_header_frame='{odom_frame}' "
@@ -132,16 +129,21 @@ class SensorBridge:
                 f"goal_frame='{current_goal.frame_id if current_goal else ''}' "
                 f"base_frame='{self.args.base_frame}'"
             )
-            if odom is not None and current_goal is not None:
-                print(
-                    "[snapshot] "
-                    f"GOAL_WORLD=[{current_goal.x:.6f},{current_goal.y:.6f}] "
-                    f"ROBOT_WORLD_XY=[{position[0]:.6f},{position[1]:.6f}] "
-                    f"ROBOT_YAW={yaw:.6f} "
-                    f"GOAL_BODY=[{goal_body[0]:.6f},{goal_body[1]:.6f}] "
-                    f"GOAL_DISTANCE={float(np.linalg.norm(goal_body)):.6f}"
-                )
             self._printed_first_snapshot = True
+        if goal is None:
+            goal_body = np.zeros(2, dtype=np.float32)
+        else:
+            goal_body = self.goal_manager.relative_xy(position, yaw, odom_frame, self.args.base_frame)
+        if not self._printed_goal_snapshot and odom is not None and current_goal is not None:
+            print(
+                "[snapshot] "
+                f"GOAL_WORLD=[{current_goal.x:.6f},{current_goal.y:.6f}] "
+                f"ROBOT_WORLD_XY=[{position[0]:.6f},{position[1]:.6f}] "
+                f"ROBOT_YAW={yaw:.6f} "
+                f"GOAL_BODY=[{goal_body[0]:.6f},{goal_body[1]:.6f}] "
+                f"GOAL_DISTANCE={float(np.linalg.norm(goal_body)):.6f}"
+            )
+            self._printed_goal_snapshot = True
         ages = health["ages"]
         packet = make_packet(
             sequence=self.sequence,

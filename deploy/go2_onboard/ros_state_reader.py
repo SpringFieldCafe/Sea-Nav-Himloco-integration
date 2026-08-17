@@ -116,7 +116,7 @@ class RosStateReader:
         if getattr(topics, "goal", ""):
             self.node.create_subscription(PointStamped, topics.goal, self._goal_callback, 10)
 
-    def _store(self, slot, value, message=None):
+    def _store(self, slot, value, message=None, *, frame_id=None, child_frame_id=None):
         with self.lock:
             now = time.monotonic()
             if slot.received_at:
@@ -132,8 +132,11 @@ class RosStateReader:
             slot.received_at = now
             slot.count += 1
             slot.source_timestamp = _message_timestamp(message)
-            slot.frame_id = _message_frame_id(message)
-            slot.child_frame_id = str(getattr(message, "child_frame_id", "") or "")
+            slot.frame_id = _message_frame_id(message) if frame_id is None else str(frame_id)
+            slot.child_frame_id = (
+                str(getattr(message, "child_frame_id", "") or "")
+                if child_frame_id is None else str(child_frame_id)
+            )
             if message is not None:
                 slot.message_type = f"{type(message).__module__}.{type(message).__name__}"
 
@@ -187,6 +190,9 @@ class RosStateReader:
     def _odom_callback(self, msg):
         twist = msg.twist.twist
         position = msg.pose.pose.position
+        header = getattr(msg, "header", None)
+        odom_frame = str(getattr(header, "frame_id", "") or "")
+        odom_child_frame = str(getattr(msg, "child_frame_id", "") or "")
         self._store(self.odom, OdomData(
             linear_velocity=np.asarray([twist.linear.x, twist.linear.y, twist.linear.z], dtype=np.float32),
             angular_velocity=np.asarray([twist.angular.x, twist.angular.y, twist.angular.z], dtype=np.float32),
@@ -197,9 +203,9 @@ class RosStateReader:
                 msg.pose.pose.orientation.y,
                 msg.pose.pose.orientation.z,
             ], dtype=np.float32),
-            frame_id=_message_frame_id(msg),
-            child_frame_id=str(getattr(msg, "child_frame_id", "") or ""),
-        ), msg)
+            frame_id=odom_frame,
+            child_frame_id=odom_child_frame,
+        ), msg, frame_id=odom_frame, child_frame_id=odom_child_frame)
 
     def _wireless_callback(self, msg):
         self._store(self.wireless, msg, msg)
