@@ -2,10 +2,13 @@ import ast
 import types
 from pathlib import Path
 
+import pytest
+
 from deploy.go2_onboard import scheduler_probe
 
 
-def test_lowstate_probe_uses_read_only_subscriber_and_never_writes(monkeypatch):
+@pytest.mark.parametrize("queue_len", (0, 10))
+def test_lowstate_probe_uses_read_only_subscriber_and_never_writes(monkeypatch, queue_len):
     calls = {"factory": [], "subscriber": [], "publisher": 0, "writes": 0}
 
     class ReadOnlyChannelModule:
@@ -24,7 +27,7 @@ def test_lowstate_probe_uses_read_only_subscriber_and_never_writes(monkeypatch):
                 calls["subscriber"].append((topic, message_type))
 
             def Init(self, callback, queue_len):
-                assert queue_len == 10
+                assert queue_len in (0, 10)
                 callback(object())
 
             def Close(self):
@@ -41,14 +44,14 @@ def test_lowstate_probe_uses_read_only_subscriber_and_never_writes(monkeypatch):
         raise AssertionError(f"unexpected import: {name}")
 
     monkeypatch.setattr(scheduler_probe.importlib, "import_module", fake_import)
-    result = scheduler_probe.run_lowstate_probe(0.01, "enp3s0")
+    result = scheduler_probe.run_lowstate_probe(0.01, "enp3s0", queue_len)
 
     assert calls["factory"] == [(0, "enp3s0")]
     assert calls["subscriber"] == [("rt/lowstate", LowState)]
     assert calls["publisher"] == 0
     assert calls["writes"] == 0
     assert result["topic"] == "rt/lowstate"
-    assert result["queue_len"] == 10
+    assert result["queue_len"] == queue_len
     assert result["LOWCMD_PUBLISHER_CREATED"] == "NO"
     assert result["LOWCMD_WRITE_COUNT"] == 0
     assert result["lowstate"]["rx_count"] == 1

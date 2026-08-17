@@ -14,6 +14,14 @@ from collections import deque
 
 
 PERIOD = 0.020
+SCHEDULER_NAMES = {
+    0: "SCHED_OTHER",
+    1: "SCHED_FIFO",
+    2: "SCHED_RR",
+    3: "SCHED_BATCH",
+    5: "SCHED_IDLE",
+    6: "SCHED_DEADLINE",
+}
 
 
 def percentile(values, p):
@@ -41,15 +49,89 @@ def system_snapshot():
         scheduler = os.sched_getscheduler(0)
     except OSError:
         scheduler = None
-    scheduler_names = {0: "SCHED_OTHER", 1: "SCHED_FIFO", 2: "SCHED_RR", 3: "SCHED_BATCH", 5: "SCHED_IDLE", 6: "SCHED_DEADLINE"}
     return {
         "cpu_governor": governors,
         "cpu_frequency_khz": frequencies,
         "loadavg": load,
         "pid": os.getpid(),
         "scheduler_class": scheduler,
-        "scheduler_class_name": scheduler_names.get(scheduler, "unknown"),
+        "scheduler_class_name": SCHEDULER_NAMES.get(scheduler, "unknown"),
     }
+
+
+def _read_proc_stat(path):
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+        closing = text.rfind(")")
+        fields = text[closing + 2 :].split()
+        return {
+            "name": text[text.find("(") + 1 : closing],
+            "utime_ticks": int(fields[11]),
+            "stime_ticks": int(fields[12]),
+        }
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_context_switches(path):
+    values = {"voluntary": 0, "nonvoluntary": 0}
+    try:
+        for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+            if line.startswith("voluntary_ctxt_switches:"):
+                values["voluntary"] = int(line.split()[-1])
+            elif line.startswith("nonvoluntary_ctxt_switches:"):
+                values["nonvoluntary"] = int(line.split()[-1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return values
+
+
+def _read_thread_stats():
+    threads = {}
+    task_root = pathlib.Path("/proc/self/task")
+    for task_path in task_root.iterdir():
+        tid = task_path.name
+        stat = _read_proc_stat(task_path / "stat")
+        switches = _read_context_switches(task_path / "status")
+        if stat is None or switches is None:
+            continue
+        try:
+            scheduler = os.sched_getscheduler(int(tid))
+        except (OSError, ValueError):
+            scheduler = None
+        threads[tid] = {
+            **stat,
+            "scheduler_class": scheduler,
+            "scheduler_class_name": SCHEDULER_NAMES.get(scheduler, "unknown"),
+            "voluntary": switches["voluntary"],
+            "nonvoluntary": switches["nonvoluntary"],
+        }
+    return threads
+
+
+def _thread_stats_delta(before, after, elapsed):
+    ticks_per_second = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+    threads = []
+    for tid, current in sorted(after.items(), key=lambda item: int(item[0])):
+        previous = before.get(tid, current)
+        cpu_ticks = (
+            current["utime_ticks"]
+            + current["stime_ticks"]
+            - previous["utime_ticks"]
+            - previous["stime_ticks"]
+        )
+        threads.append(
+            {
+                "tid": int(tid),
+                "name": current["name"],
+                "cpu_percent": cpu_ticks / ticks_per_second / elapsed * 100.0 if elapsed else 0.0,
+                "scheduler_class": current["scheduler_class"],
+                "scheduler_class_name": current["scheduler_class_name"],
+                "voluntary_context_switches": current["voluntary"] - previous["voluntary"],
+                "nonvoluntary_context_switches": current["nonvoluntary"] - previous["nonvoluntary"],
+            }
+        )
+    return threads
 
 
 class Heartbeat:
@@ -77,6 +159,7 @@ def _run_scheduler(duration, on_tick=None):
     """Run the common 50 Hz loop while an optional read-only callback runs."""
     heartbeat = Heartbeat()
     heartbeat.start()
+    thread_stats_before = _read_thread_stats()
     starts = []
     periods = []
     overshoots = []
@@ -105,6 +188,8 @@ def _run_scheduler(duration, on_tick=None):
             deadline_misses += 1
             next_tick = time.monotonic()
     elapsed = time.monotonic() - started_at
+    thread_stats_after = _read_thread_stats()
+    thread_stats = _thread_stats_delta(thread_stats_before, thread_stats_after, elapsed)
     heartbeat.close()
 
     def ms(values):
@@ -126,6 +211,10 @@ def _run_scheduler(duration, on_tick=None):
         "heartbeat_gt50_count": sum(value > 50.0 for value in heartbeat_ms),
         "heartbeat_gt100_count": sum(value > 100.0 for value in heartbeat_ms),
         "deadline_misses": deadline_misses,
+        "thread_cpu": {
+            "process_cpu_percent": sum(thread["cpu_percent"] for thread in thread_stats),
+            "threads": thread_stats,
+        },
     }
 
 
@@ -141,7 +230,7 @@ def run_probe(duration, mode, net=None):
     return result
 
 
-def run_lowstate_probe(duration, net):
+def run_lowstate_probe(duration, net, queue_len=10):
     """Measure the scheduler with only the read-only rt/lowstate subscriber."""
     channel = importlib.import_module("unitree_sdk2py.core.channel")
     messages = importlib.import_module("unitree_sdk2py.idl.unitree_go.msg.dds_")
@@ -168,7 +257,7 @@ def run_lowstate_probe(duration, net):
         measurements["callback_durations"].append(time.monotonic() - started)
 
     subscriber = channel.ChannelSubscriber("rt/lowstate", lowstate_type)
-    subscriber.Init(callback, 10)
+    subscriber.Init(callback, queue_len)
     try:
         result = _run_scheduler(duration)
     finally:
@@ -181,7 +270,7 @@ def run_lowstate_probe(duration, net):
         {
             "mode": "lowstate_read_only",
             "topic": "rt/lowstate",
-            "queue_len": 10,
+            "queue_len": queue_len,
             "lowstate": {
                 "rx_count": measurements["rx_count"],
                 "rx_rate_hz": measurements["rx_count"] / elapsed if elapsed else 0.0,
@@ -216,6 +305,7 @@ def main():
     parser.add_argument("--mode", choices=("pure_python", "sdk_import_only", "sdk_factory_only", "lowstate_read_only"), required=True)
     parser.add_argument("--duration", type=float, default=60.0)
     parser.add_argument("--net", default=None, help="network interface used only by lowstate_read_only")
+    parser.add_argument("--queue-len", type=int, choices=(0, 10), default=10)
     parser.add_argument("--allow-live-lowstate", action="store_true")
     args = parser.parse_args()
     if args.mode == "lowstate_read_only" and not args.allow_live_lowstate:
@@ -223,7 +313,7 @@ def main():
     if args.mode == "lowstate_read_only":
         if not args.net:
             raise SystemExit("lowstate_read_only requires --net")
-        result = run_lowstate_probe(args.duration, args.net)
+        result = run_lowstate_probe(args.duration, args.net, args.queue_len)
     else:
         result = run_probe(args.duration, args.mode, args.net)
     print(json.dumps(result, sort_keys=True))
