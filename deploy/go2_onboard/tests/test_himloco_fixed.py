@@ -14,6 +14,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     EXPECTED_SHA256,
     FixedHIMLocoController,
     ARM_WAIT_TIMEOUT,
+    POLICY_WARMUP_STEPS,
     KD,
     KP,
     POLICY_TO_MOTOR,
@@ -36,6 +37,7 @@ def test_current_1460_hash_and_shape():
     with torch.inference_mode():
         output = policy(torch.zeros((1, EXPECTED_INPUT_DIM)))
     assert tuple(output.shape) == (1, EXPECTED_OUTPUT_DIM)
+    assert POLICY_WARMUP_STEPS == 10
 
 
 def test_fixed_observation_is_270_and_newest_first():

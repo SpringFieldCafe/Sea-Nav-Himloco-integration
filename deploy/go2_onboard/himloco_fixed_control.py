@@ -35,6 +35,7 @@ STALE_MAX_AGE = 0.10
 ARM_WAIT_TIMEOUT = 5.0
 ACTION_CLIP = 100.0
 ACTION_SCALE = 0.25
+POLICY_WARMUP_STEPS = 10
 KP = 20.0
 KD = 0.5
 COMMAND_SCALE = np.asarray([2.0, 2.0, 0.25], dtype=np.float32)
@@ -180,13 +181,19 @@ class FixedHIMLocoController:
             raise SafetyError(f"model SHA256 mismatch: expected {EXPECTED_SHA256}, got {actual}")
         self.policy = torch.jit.load(str(path), map_location="cpu").eval()
         with torch.inference_mode():
-            output = self.policy(torch.zeros((1, EXPECTED_INPUT_DIM), dtype=torch.float32))
+            probe = torch.zeros((1, EXPECTED_INPUT_DIM), dtype=torch.float32)
+            output = self.policy(probe)
         if tuple(output.shape) != (1, EXPECTED_OUTPUT_DIM):
             raise SafetyError(f"model contract must be 270->12, got {tuple(output.shape)}")
         if not torch.isfinite(output).all():
             raise SafetyError("model contract probe returned NaN/Inf")
+        with torch.inference_mode():
+            for _ in range(POLICY_WARMUP_STEPS):
+                warmup_output = self.policy(probe)
+        if not torch.isfinite(warmup_output).all():
+            raise SafetyError("model warm-up returned NaN/Inf")
         print(f"[model] path={path}")
-        print(f"[model] sha256={actual} input=270 output=12")
+        print(f"[model] sha256={actual} input=270 output=12 warmup={POLICY_WARMUP_STEPS}")
 
     def check_motion_owner(self):
         """Refuse ARM when Unitree high-level motion service owns the robot."""
