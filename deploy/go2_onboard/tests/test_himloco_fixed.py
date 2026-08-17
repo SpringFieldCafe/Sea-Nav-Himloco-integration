@@ -9,6 +9,7 @@ import torch
 from deploy.go2_onboard.himloco_fixed_control import (
     ACTION_SCALE,
     APPROVED_POLICIES,
+    approved_policy_profile_for_path,
     COMMAND_SCALE,
     DEFAULT_ANGLES,
     EXPECTED_INPUT_DIM,
@@ -210,6 +211,52 @@ def test_pose_transition_starts_at_current_and_ends_at_default():
 @pytest.mark.parametrize("command", [(0.0, 0.0, 0.0), (0.15, 0.0, 0.0), (0.0, 0.0, 0.15), (0.0, 0.0, -0.15)])
 def test_fixed_command_whitelist(command):
     assert validate_fixed_command(*command).as_array().shape == (3,)
+
+
+def test_legacy_reproduction_requires_exact_approved_command():
+    command = validate_fixed_command(
+        0.4,
+        0.0,
+        0.0,
+        policy_profile="legacy_policy_1",
+        legacy_repro=True,
+    )
+    np.testing.assert_allclose(command.as_array(), [0.4, 0.0, 0.0])
+
+
+@pytest.mark.parametrize("command", [(0.2, 0.0, 0.0), (0.3, 0.0, 0.0), (0.5, 0.0, 0.0)])
+def test_legacy_reproduction_rejects_other_speeds(command):
+    with pytest.raises(SafetyError, match="exact command"):
+        validate_fixed_command(
+            *command,
+            policy_profile="legacy_policy_1",
+            legacy_repro=True,
+        )
+
+
+def test_legacy_reproduction_rejects_1460_profile():
+    with pytest.raises(SafetyError, match="requires the approved legacy_policy_1"):
+        validate_fixed_command(
+            0.4,
+            0.0,
+            0.0,
+            policy_profile="himloco_1460",
+            legacy_repro=True,
+        )
+
+
+def test_legacy_reproduction_requires_approved_file_content():
+    assert approved_policy_profile_for_path("models/locomotion/himloco/policy_1.pt") == "legacy_policy_1"
+    unknown = Path("/tmp/unknown_himloco_policy.pt")
+    unknown.write_bytes(b"not-an-approved-policy")
+    with pytest.raises(SafetyError, match="not approved"):
+        approved_policy_profile_for_path(str(unknown))
+    unknown.unlink()
+
+
+def test_normal_mode_still_rejects_legacy_speed():
+    with pytest.raises(SafetyError, match="conservative first-test limit"):
+        validate_fixed_command(0.4, 0.0, 0.0)
 
 
 @pytest.mark.parametrize("command", [(-0.01, 0.0, 0.0), (0.16, 0.0, 0.0), (0.0, 0.01, 0.0), (0.1, 0.0, 0.1)])

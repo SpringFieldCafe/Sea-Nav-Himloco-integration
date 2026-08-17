@@ -155,11 +155,49 @@ def configure_torch_runtime(threads=TORCH_THREADS, interop_threads=TORCH_INTEROP
         raise SafetyError(f"unable to configure Torch realtime threads: {exc}") from exc
 
 
-def validate_fixed_command(vx: float, vy: float, wz: float) -> FixedCommand:
-    """Allow only the first three deliberately small test modes."""
+def approved_policy_profile_for_path(path: str) -> str:
+    """Resolve a policy profile from file content before command validation."""
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise SafetyError(f"HIMLoco model does not exist: {resolved}")
+    actual = sha256_file(str(resolved))
+    profile = APPROVED_POLICY_PROFILES.get(actual)
+    if profile is None:
+        approved = ", ".join(sorted(APPROVED_POLICIES.values()))
+        raise SafetyError(
+            f"model SHA256 is not approved: got {actual}; approved hashes: {approved}"
+        )
+    return profile
+
+
+def validate_fixed_command(
+    vx: float,
+    vy: float,
+    wz: float,
+    *,
+    policy_profile: Optional[str] = None,
+    legacy_repro: bool = False,
+) -> FixedCommand:
+    """Validate conservative commands, with one explicit legacy reproduction mode."""
     values = np.asarray([vx, vy, wz], dtype=np.float64)
     if values.shape != (3,) or not np.isfinite(values).all():
         raise SafetyError("fixed command must be three finite numbers")
+
+    if legacy_repro:
+        if policy_profile != "legacy_policy_1":
+            raise SafetyError(
+                "--legacy-repro requires the approved legacy_policy_1 profile"
+            )
+        if not (
+            np.isclose(float(vx), 0.40, atol=1e-8, rtol=0.0)
+            and np.isclose(float(vy), 0.0, atol=1e-8, rtol=0.0)
+            and np.isclose(float(wz), 0.0, atol=1e-8, rtol=0.0)
+        ):
+            raise SafetyError(
+                "--legacy-repro permits only the exact command [0.4, 0.0, 0.0]"
+            )
+        return FixedCommand(0.40, 0.0, 0.0)
+
     if abs(float(vy)) > 1e-8:
         raise SafetyError("first milestone permits vy=0 only")
     if abs(float(vx)) > 0.15 or abs(float(wz)) > 0.15:
@@ -996,6 +1034,11 @@ def build_parser():
     parser.add_argument("--vx", type=float, required=True)
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--wz", type=float, default=0.0)
+    parser.add_argument(
+        "--legacy-repro",
+        action="store_true",
+        help="legacy_policy_1 only: permit the exact historical command [0.4, 0, 0]",
+    )
     parser.add_argument("--max-sensor-age", type=float, default=STALE_MAX_AGE)
     parser.add_argument(
         "--event-trace",
@@ -1021,9 +1064,25 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     configure_torch_runtime(args.torch_threads, args.torch_interop_threads)
-    args.command = validate_fixed_command(args.vx, args.vy, args.wz)
     controller = FixedHIMLocoController(args)
     try:
+        policy_profile = None
+        if args.legacy_repro:
+            if args.comm_only:
+                raise SafetyError("--legacy-repro cannot be used with --comm-only")
+            policy_profile = approved_policy_profile_for_path(args.policy)
+        args.command = validate_fixed_command(
+            args.vx,
+            args.vy,
+            args.wz,
+            policy_profile=policy_profile,
+            legacy_repro=args.legacy_repro,
+        )
+        if args.legacy_repro:
+            print(
+                "[safety] LEGACY_REPRO_MODE "
+                f"policy_profile={policy_profile} approved_command=[0.4,0,0]"
+            )
         if not args.comm_only:
             controller.validate_model()
         controller.connect()
