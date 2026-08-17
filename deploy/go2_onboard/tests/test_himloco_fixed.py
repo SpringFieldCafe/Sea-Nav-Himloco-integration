@@ -134,7 +134,7 @@ def test_stop_transitions_to_exit_without_transport():
 def test_lowstate_subscriber_is_retained_by_controller():
     source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
     assert "self.lowstate_subscriber = ChannelSubscriber" in source
-    assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
     assert ARM_WAIT_TIMEOUT == 5.0
     assert "no fresh LowState received within" in source
 
@@ -146,13 +146,15 @@ def test_startup_sequence_has_pose_transition_and_policy_gate():
     assert "DEFAULT_POSE_HOLD" in source
     assert "HISTORY_INIT_SOURCE=latest_default_pose_lowstate" in source
     assert "repeat_history=True" in source
-    assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
     assert "self.policy_durations" in source
     assert "self.control_periods" in source
     assert "deadline_miss_count" in source
     assert "next_tick += CONTROL_DT" in source
     assert "period_p99_ms" in source
     assert "publish_p95_ms" in source
+    assert "callback_p95_ms" in source
+    assert "forward_p95_ms" in source
 
 
 def test_realtime_torch_defaults_are_single_threaded():
@@ -174,6 +176,7 @@ def test_lowstate_callback_updates_thread_safe_receive_metrics():
     controller.last_lowstate_rx = 0.0
     controller.lowstate_rx_count = 0
     controller.lowstate_intervals = []
+    controller.lowstate_callback_durations = []
     controller._low_state_callback(Message())
     assert controller.lowstate_rx_count == 1
     assert controller.snapshot.message.__class__ is Message

@@ -202,9 +202,18 @@ class FixedHIMLocoController:
         self.lowstate_rx_count = 0
         self.last_lowstate_rx = 0.0
         self.lowstate_intervals = deque(maxlen=512)
+        self.lowstate_callback_durations = deque(maxlen=512)
         self.policy_durations = deque(maxlen=512)
+        self.prepare_durations = deque(maxlen=512)
+        self.observation_durations = deque(maxlen=512)
+        self.forward_durations = deque(maxlen=512)
+        self.action_durations = deque(maxlen=512)
         self.publish_durations = deque(maxlen=512)
         self.last_policy_ms = 0.0
+        self.last_prepare_ms = 0.0
+        self.last_observation_ms = 0.0
+        self.last_forward_ms = 0.0
+        self.last_action_ms = 0.0
         self.last_publish_ms = 0.0
         self.loop_durations = deque(maxlen=512)
         self.control_periods = deque(maxlen=512)
@@ -274,9 +283,10 @@ class FixedHIMLocoController:
         self.publisher = ChannelPublisher("rt/lowcmd", LowCmdGo)
         self.publisher.Init()
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowStateGo)
-        # Keep the callback on the SDK/DDS reader path.  A bounded intermediate
-        # queue can retain stale 500 Hz samples while the control loop runs.
-        self.lowstate_subscriber.Init(self._low_state_callback, 0)
+        # Match the previously working deployment: DDS only enqueues samples;
+        # the SDK reader thread invokes the Python snapshot callback. This
+        # keeps Python callback work out of CycloneDDS's listener thread.
+        self.lowstate_subscriber.Init(self._low_state_callback, 10)
         self._initialize_command(self.low_cmd)
         print("[safety] SDK2 connected; no policy command will be sent before Start/A sequence")
 
@@ -294,6 +304,7 @@ class FixedHIMLocoController:
             motor.tau = 0.0
 
     def _low_state_callback(self, message):
+        callback_start = time.monotonic()
         received_at = time.monotonic()
         try:
             keys = decode_remote_keys(message.wireless_remote)
@@ -305,6 +316,7 @@ class FixedHIMLocoController:
             self.last_lowstate_rx = received_at
             self.lowstate_rx_count += 1
             self.snapshot = LowStateSnapshot(message, received_at, keys)
+        self.lowstate_callback_durations.append(time.monotonic() - callback_start)
 
     def _snapshot(self):
         with self.snapshot_lock:
@@ -349,10 +361,20 @@ class FixedHIMLocoController:
         return gyro, gravity, q_policy, dq_policy
 
     def _run_policy_once(self, command, snapshot):
+        prepare_start = time.monotonic()
         gyro, gravity, q_policy, dq_policy = self._prepare_sensor(snapshot.message)
+        self.last_prepare_ms = (time.monotonic() - prepare_start) * 1000.0
+        self.prepare_durations.append(time.monotonic() - prepare_start)
+        observation_start = time.monotonic()
         observation = build_observation(self.him_obs, command.as_array(), gyro, gravity, q_policy, dq_policy)
+        self.last_observation_ms = (time.monotonic() - observation_start) * 1000.0
+        self.observation_durations.append(time.monotonic() - observation_start)
+        forward_start = time.monotonic()
         with torch.inference_mode():
             action = self.policy(observation).reshape(-1).detach().cpu().numpy()
+        self.last_forward_ms = (time.monotonic() - forward_start) * 1000.0
+        self.forward_durations.append(time.monotonic() - forward_start)
+        action_start = time.monotonic()
         target_policy = build_target_q(action)
         for policy_index, motor_index in enumerate(POLICY_TO_MOTOR):
             motor = self.low_cmd.motor_cmd[motor_index]
@@ -362,6 +384,8 @@ class FixedHIMLocoController:
             motor.kd = KD
             motor.tau = 0.0
         self.him_obs.record_action(torch.from_numpy(np.clip(action, -ACTION_CLIP, ACTION_CLIP)).reshape(1, 12))
+        self.last_action_ms = (time.monotonic() - action_start) * 1000.0
+        self.action_durations.append(time.monotonic() - action_start)
         return action
 
     def _check_runtime_safety(self, snapshot):
@@ -487,12 +511,22 @@ class FixedHIMLocoController:
         else:
             rx_rate, p50, p95 = 0.0, 0.0, 0.0
         loops = np.asarray(self.loop_durations, dtype=np.float64)
+        callbacks = np.asarray(self.lowstate_callback_durations, dtype=np.float64)
         policies = np.asarray(self.policy_durations, dtype=np.float64)
+        prepares = np.asarray(self.prepare_durations, dtype=np.float64)
+        observations = np.asarray(self.observation_durations, dtype=np.float64)
+        forwards = np.asarray(self.forward_durations, dtype=np.float64)
+        actions = np.asarray(self.action_durations, dtype=np.float64)
         publishes = np.asarray(self.publish_durations, dtype=np.float64)
         periods = np.asarray(self.control_periods, dtype=np.float64)
         lateness = np.asarray(self.deadline_lateness, dtype=np.float64)
         loop_p95 = float(np.percentile(loops, 95) * 1000.0) if loops.size else 0.0
+        callback_p95 = float(np.percentile(callbacks, 95) * 1000.0) if callbacks.size else 0.0
         policy_p95 = float(np.percentile(policies, 95) * 1000.0) if policies.size else 0.0
+        prepare_p95 = float(np.percentile(prepares, 95) * 1000.0) if prepares.size else 0.0
+        observation_p95 = float(np.percentile(observations, 95) * 1000.0) if observations.size else 0.0
+        forward_p95 = float(np.percentile(forwards, 95) * 1000.0) if forwards.size else 0.0
+        action_p95 = float(np.percentile(actions, 95) * 1000.0) if actions.size else 0.0
         publish_p95 = float(np.percentile(publishes, 95) * 1000.0) if publishes.size else 0.0
         period_values = periods * 1000.0
         period_p50 = float(np.percentile(period_values, 50)) if periods.size else 0.0
@@ -505,17 +539,25 @@ class FixedHIMLocoController:
             "[diagnostics] state=%s lowstate_rx=%d lowstate_rate_hz=%.1f "
             "rx_p50_ms=%.2f rx_p95_ms=%.2f age_ms=%.2f policy_ms=%.2f "
             "policy_p95_ms=%.2f publish_ms=%.2f publish_p95_ms=%.2f "
+            "callback_p95_ms=%.2f prepare_p95_ms=%.2f obs_p95_ms=%.2f "
+            "forward_p95_ms=%.2f action_p95_ms=%.2f "
             "loop_p95_ms=%.2f control_rate_hz=%.2f period_p50_ms=%.2f "
             "period_p95_ms=%.2f period_p99_ms=%.2f period_max_ms=%.2f "
             "deadline_misses=%d max_deadline_lateness_ms=%.2f"
             % (self.state.value, rx_count, rx_rate, p50, p95, age_ms,
                self.last_policy_ms, policy_p95, self.last_publish_ms,
-               publish_p95, loop_p95, rate, period_p50, period_p95,
+               publish_p95, callback_p95, prepare_p95, observation_p95,
+               forward_p95, action_p95, loop_p95, rate, period_p50, period_p95,
                period_p99, period_max, self.deadline_miss_count, late_max)
         )
 
     def _reset_active_metrics(self):
+        self.lowstate_callback_durations.clear()
         self.policy_durations.clear()
+        self.prepare_durations.clear()
+        self.observation_durations.clear()
+        self.forward_durations.clear()
+        self.action_durations.clear()
         self.publish_durations.clear()
         self.loop_durations.clear()
         self.control_periods.clear()
