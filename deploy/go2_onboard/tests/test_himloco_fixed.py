@@ -24,6 +24,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     build_observation,
     build_target_q,
     configure_torch_runtime,
+    require_performance_governor,
     pose_transition_target,
     projected_gravity_from_wxyz,
     sha256_file,
@@ -105,6 +106,21 @@ def test_watchdog_and_imu_finite_contract():
     np.testing.assert_allclose(projected_gravity_from_wxyz([1.0, 0.0, 0.0, 0.0]), [0.0, 0.0, -1.0])
 
 
+def test_performance_governor_preflight_accepts_all_performance_policies(capsys):
+    require_performance_governor({"policy0": "performance", "policy1": "performance"})
+    assert "CPU governor preflight: performance" in capsys.readouterr().out
+
+
+def test_performance_governor_preflight_rejects_powersave():
+    with pytest.raises(SafetyError, match="must be 'performance'"):
+        require_performance_governor({"policy0": "powersave"})
+
+
+def test_performance_governor_preflight_rejects_missing_policies():
+    with pytest.raises(SafetyError, match="preflight unavailable"):
+        require_performance_governor({})
+
+
 def test_shadow_remains_read_only():
     for name in ("shadow_worker.py", "runtime.py", "ros_state_reader.py"):
         source = Path("deploy/go2_onboard") / name
@@ -135,7 +151,8 @@ def test_stop_transitions_to_exit_without_transport():
 def test_lowstate_subscriber_is_retained_by_controller():
     source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
     assert "self.lowstate_subscriber = ChannelSubscriber" in source
-    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" not in source
     assert ARM_WAIT_TIMEOUT == 5.0
     assert "no fresh LowState received within" in source
 
@@ -147,7 +164,7 @@ def test_startup_sequence_has_pose_transition_and_policy_gate():
     assert "DEFAULT_POSE_HOLD" in source
     assert "HISTORY_INIT_SOURCE=latest_default_pose_lowstate" in source
     assert "repeat_history=True" in source
-    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
     assert "self.policy_durations" in source
     assert "self.control_periods" in source
     assert "deadline_miss_count" in source
@@ -157,7 +174,7 @@ def test_startup_sequence_has_pose_transition_and_policy_gate():
     assert "callback_p95_ms" in source
     assert "forward_p95_ms" in source
     assert "self._dump_event_trace" in source
-    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
 
 
 def test_comm_only_mode_skips_policy_load_and_execution():

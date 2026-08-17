@@ -73,6 +73,48 @@ class SafetyError(RuntimeError):
     """Fail-closed error before or during real-robot control."""
 
 
+def read_cpu_governors(root="/sys/devices/system/cpu/cpufreq"):
+    """Return the governor configured for each visible cpufreq policy."""
+    policies = {}
+    for governor_path in sorted(Path(root).glob("policy*/scaling_governor")):
+        try:
+            policies[governor_path.parent.name] = governor_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SafetyError(
+                f"unable to read CPU governor {governor_path}: {exc}"
+            ) from exc
+    return policies
+
+
+def require_performance_governor(governors=None):
+    """Fail closed unless every visible CPU policy is explicitly performance."""
+    governors = read_cpu_governors() if governors is None else dict(governors)
+    if not governors:
+        raise SafetyError(
+            "CPU governor preflight unavailable; refusing real control. "
+            "Set every cpufreq policy to performance and rerun."
+        )
+    non_performance = {
+        policy: governor
+        for policy, governor in sorted(governors.items())
+        if governor != "performance"
+    }
+    if non_performance:
+        details = ", ".join(
+            f"{policy}={governor or '<empty>'}"
+            for policy, governor in non_performance.items()
+        )
+        raise SafetyError(
+            "CPU governor must be 'performance' for real control; "
+            f"found {details}. Change it manually and rerun; this program "
+            "will not modify governor."
+        )
+    print(
+        "[safety] CPU governor preflight: performance "
+        f"policies={','.join(sorted(governors))}"
+    )
+
+
 @dataclass(frozen=True)
 class FixedCommand:
     vx: float
@@ -379,16 +421,16 @@ class FixedHIMLocoController:
         except ImportError as exc:
             raise SafetyError("Unitree SDK2 imports unavailable; cannot start real controller") from exc
         self._sdk = (ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize, unitree_go_msg_dds__LowCmd_, LowCmdGo, LowStateGo, CRC)
+        require_performance_governor()
         ChannelFactoryInitialize(0, self.args.net)
         self.check_motion_owner()
         self.low_cmd = unitree_go_msg_dds__LowCmd_()
         self.publisher = ChannelPublisher("rt/lowcmd", LowCmdGo)
         self.publisher.Init()
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowStateGo)
-        # Match the previously working deployment: DDS only enqueues samples;
-        # the SDK reader thread invokes the Python snapshot callback. This
-        # keeps Python callback work out of CycloneDDS's listener thread.
-        self.lowstate_subscriber.Init(self._low_state_callback, 10)
+        # Direct callback delivery avoids the queue backlog and freshness gaps
+        # observed with queueLen=10 under the measured CPU governor settings.
+        self.lowstate_subscriber.Init(self._low_state_callback, 0)
         self._initialize_command(self.low_cmd)
         self._start_diagnostics()
         print("[safety] SDK2 connected; no policy command will be sent before Start/A sequence")
