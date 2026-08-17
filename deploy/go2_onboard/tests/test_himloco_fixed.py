@@ -25,6 +25,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     build_target_q,
     configure_torch_runtime,
     require_performance_governor,
+    advance_active_deadline,
     pose_transition_target,
     projected_gravity_from_wxyz,
     sha256_file,
@@ -168,7 +169,7 @@ def test_startup_sequence_has_pose_transition_and_policy_gate():
     assert "self.policy_durations" in source
     assert "self.control_periods" in source
     assert "deadline_miss_count" in source
-    assert "next_tick += CONTROL_DT" in source
+    assert "advance_active_deadline" in source
     assert "period_p99_ms" in source
     assert "publish_p95_ms" in source
     assert "callback_p95_ms" in source
@@ -196,6 +197,33 @@ def test_absolute_deadline_does_not_add_work_time_and_resyncs_overrun():
     next_tick, sleep_time = advance_deadline(next_tick, 0.105)
     assert next_tick == pytest.approx(0.105)
     assert sleep_time == 0.0
+
+
+def test_active_scheduler_path_stays_at_50hz_for_1000_cycles():
+    """Exercise the same post-control scheduling order used by ACTIVE.run."""
+    now = 0.0
+    next_tick = 0.0
+    starts = []
+    lateness = []
+    for _ in range(1000):
+        starts.append(now)
+        now += 0.001  # representative control work; below the 20 ms budget
+        next_tick, sleep_time, late = advance_active_deadline(next_tick, now)
+        lateness.append(late)
+        now += sleep_time
+
+    periods_ms = np.diff(np.asarray(starts)) * 1000.0
+    assert np.percentile(periods_ms, 50) == pytest.approx(20.0)
+    assert np.percentile(periods_ms, 95) == pytest.approx(20.0)
+    assert np.max(periods_ms) == pytest.approx(20.0)
+    assert max(lateness) == pytest.approx(0.0)
+
+
+def test_active_run_advances_deadline_once():
+    source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
+    active = source.split("    def run(self):", 1)[1].split("    def run_comm_only", 1)[0]
+    assert "next_tick += CONTROL_DT" not in active
+    assert active.count("advance_active_deadline(") == 1
 
 
 def test_realtime_torch_defaults_are_single_threaded():

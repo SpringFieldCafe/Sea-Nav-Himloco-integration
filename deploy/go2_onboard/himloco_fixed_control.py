@@ -189,6 +189,19 @@ def advance_deadline(next_tick: float, now: float, period: float = CONTROL_DT):
     return now, 0.0
 
 
+def advance_active_deadline(next_tick: float, now: float, period: float = CONTROL_DT):
+    """Schedule the next ACTIVE tick and report lateness after one advance.
+
+    ``advance_deadline`` already advances by one period. Keeping the lateness
+    calculation beside that single call prevents ACTIVE from advancing the
+    same deadline twice.
+    """
+    scheduled_tick = next_tick + period
+    lateness = max(0.0, now - scheduled_tick)
+    next_tick, sleep_time = advance_deadline(next_tick, now, period)
+    return next_tick, sleep_time, lateness
+
+
 def build_observation(
     him_obs: HIMLocoObservation,
     command: Sequence[float],
@@ -843,7 +856,6 @@ class FixedHIMLocoController:
             if previous_control_start is not None:
                 self.control_periods.append(loop_start - previous_control_start)
             previous_control_start = loop_start
-            next_tick += CONTROL_DT
             snapshot = self._snapshot()
             self._check_runtime_safety(snapshot)
             policy_start = time.monotonic()
@@ -855,12 +867,12 @@ class FixedHIMLocoController:
             self.last_publish_ms = (time.monotonic() - publish_start) * 1000.0
             self.publish_durations.append(time.monotonic() - publish_start)
             self.loop_durations.append(time.monotonic() - loop_start)
-            lateness = max(0.0, time.monotonic() - next_tick)
+            schedule_now = time.monotonic()
+            next_tick, sleep_time, lateness = advance_active_deadline(next_tick, schedule_now)
             self.deadline_lateness.append(lateness)
             if lateness > 0.0:
                 self.deadline_miss_count += 1
-            self._print_diagnostics(time.monotonic())
-            next_tick, sleep_time = advance_deadline(next_tick, time.monotonic())
+            self._print_diagnostics(schedule_now)
             if sleep_time > 0:
                 time.sleep(sleep_time)
         self.stop()
