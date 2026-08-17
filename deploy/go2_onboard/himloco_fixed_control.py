@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import struct
 import threading
 import time
@@ -219,7 +220,41 @@ class FixedHIMLocoController:
         self.control_periods = deque(maxlen=512)
         self.deadline_lateness = deque(maxlen=512)
         self.deadline_miss_count = 0
+        self.event_trace = deque(maxlen=256)
+        self.event_trace_dumped = False
         self._last_summary = 0.0
+
+    def _record_event(self, event, **fields):
+        record = {
+            "event": event,
+            "monotonic": time.monotonic(),
+            "state": getattr(getattr(self, "state", None), "value", "UNKNOWN"),
+        }
+        record.update(fields)
+        self.event_trace.append(record)
+
+    def _dump_event_trace(self, reason, age_ms=None):
+        if self.event_trace_dumped:
+            return
+        self.event_trace_dumped = True
+        path = Path(self.args.event_trace).expanduser()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            records = list(self.event_trace)
+            records.append({
+                "event": "stale_detected",
+                "monotonic": time.monotonic(),
+                "state": self.state.value,
+                "reason": reason,
+                "lowstate_age_ms": age_ms,
+                "lowstate_rx_count": self.lowstate_rx_count,
+            })
+            with path.open("w", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+            print(f"[diagnostics] event_trace_dump={path} events={len(records)}")
+        except Exception as exc:
+            print(f"[diagnostics] event_trace_dump_failed={exc}")
 
     def validate_model(self):
         path = Path(self.args.policy).resolve()
@@ -305,6 +340,7 @@ class FixedHIMLocoController:
 
     def _low_state_callback(self, message):
         callback_start = time.monotonic()
+        self._record_event("rx_start", rx_monotonic=callback_start)
         received_at = time.monotonic()
         try:
             keys = decode_remote_keys(message.wireless_remote)
@@ -316,7 +352,14 @@ class FixedHIMLocoController:
             self.last_lowstate_rx = received_at
             self.lowstate_rx_count += 1
             self.snapshot = LowStateSnapshot(message, received_at, keys)
-        self.lowstate_callback_durations.append(time.monotonic() - callback_start)
+        callback_end = time.monotonic()
+        self.lowstate_callback_durations.append(callback_end - callback_start)
+        self._record_event(
+            "rx_end",
+            rx_monotonic=received_at,
+            callback_end_monotonic=callback_end,
+            callback_duration_ms=(callback_end - callback_start) * 1000.0,
+        )
 
     def _snapshot(self):
         with self.snapshot_lock:
@@ -325,8 +368,19 @@ class FixedHIMLocoController:
     def _send(self, command):
         if self.publisher is None:
             raise SafetyError("publisher is not initialized")
+        send_start = time.monotonic()
         command.crc = self._sdk[-1]().Crc(command)
+        write_start = time.monotonic()
+        self._record_event("write_start", write_start_monotonic=write_start)
         self.publisher.Write(command)
+        write_end = time.monotonic()
+        self._record_event(
+            "write_end",
+            write_start_monotonic=write_start,
+            write_end_monotonic=write_end,
+            write_duration_ms=(write_end - write_start) * 1000.0,
+            send_duration_ms=(write_end - send_start) * 1000.0,
+        )
         self.sent_any_command = True
 
     def _send_damping(self, frames=10):
@@ -390,6 +444,8 @@ class FixedHIMLocoController:
 
     def _check_runtime_safety(self, snapshot):
         if not self.watchdog.fresh(snapshot.received_at):
+            age_ms = (time.monotonic() - snapshot.received_at) * 1000.0
+            self._dump_event_trace("lowstate_stale", age_ms=age_ms)
             raise SafetyError(f"LowState stale during {self.state.value}")
         if key_pressed(snapshot.remote_keys, self.ESTOP_KEY):
             raise SafetyError("wireless ESTOP")
@@ -605,6 +661,30 @@ class FixedHIMLocoController:
                 next_tick = time.monotonic()
         self.stop()
 
+    def run_comm_only(self):
+        """Run pose transition and default-pose hold without loading HIMLoco."""
+        pose_snapshot = self._wait_for_pose_arm()
+        _, _, initial_q, _ = self._prepare_sensor(pose_snapshot.message)
+        self._move_to_default_pos(initial_q)
+        self.state = RuntimeState.DEFAULT_POSE_HOLD
+        print(
+            "[safety] COMM_ONLY_DEFAULT_POSE_HOLD duration=%.1fs; "
+            "no HIMLoco policy is loaded or executed" % self.args.comm_only_duration
+        )
+        end_time = time.monotonic() + self.args.comm_only_duration
+        next_tick = time.monotonic()
+        while time.monotonic() < end_time:
+            snapshot = self._snapshot()
+            self._check_runtime_safety(snapshot)
+            self._send_timed_pose_command(DEFAULT_ANGLES, POSE_KP, POSE_KD)
+            next_tick += CONTROL_DT
+            sleep_time = next_tick - time.monotonic()
+            if sleep_time > 0.0:
+                time.sleep(sleep_time)
+            else:
+                next_tick = time.monotonic()
+        self.stop()
+
     def stop(self):
         self.state = RuntimeState.STOPPING
         try:
@@ -633,6 +713,17 @@ def build_parser():
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--wz", type=float, default=0.0)
     parser.add_argument("--max-sensor-age", type=float, default=STALE_MAX_AGE)
+    parser.add_argument(
+        "--event-trace",
+        default="/tmp/himloco_fixed_event_trace.jsonl",
+        help="one-shot JSONL dump when LowState becomes stale",
+    )
+    parser.add_argument(
+        "--comm-only",
+        action="store_true",
+        help="pose transition/default hold only; do not load or execute HIMLoco",
+    )
+    parser.add_argument("--comm-only-duration", type=float, default=10.0)
     parser.add_argument("--torch-threads", type=int, choices=(1, 2, 4), default=TORCH_THREADS)
     parser.add_argument(
         "--torch-interop-threads",
@@ -649,9 +740,13 @@ def main(argv=None):
     args.command = validate_fixed_command(args.vx, args.vy, args.wz)
     controller = FixedHIMLocoController(args)
     try:
-        controller.validate_model()
+        if not args.comm_only:
+            controller.validate_model()
         controller.connect()
-        controller.run()
+        if args.comm_only:
+            controller.run_comm_only()
+        else:
+            controller.run()
     except KeyboardInterrupt:
         print("[safety] Ctrl+C received")
         controller.stop()

@@ -155,6 +155,15 @@ def test_startup_sequence_has_pose_transition_and_policy_gate():
     assert "publish_p95_ms" in source
     assert "callback_p95_ms" in source
     assert "forward_p95_ms" in source
+    assert "self._dump_event_trace" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 10)" in source
+
+
+def test_comm_only_mode_skips_policy_load_and_execution():
+    source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
+    assert "--comm-only" in source
+    assert "if not args.comm_only:" in source
+    assert "controller.run_comm_only()" in source
 
 
 def test_realtime_torch_defaults_are_single_threaded():
@@ -177,6 +186,7 @@ def test_lowstate_callback_updates_thread_safe_receive_metrics():
     controller.lowstate_rx_count = 0
     controller.lowstate_intervals = []
     controller.lowstate_callback_durations = []
+    controller.event_trace = []
     controller._low_state_callback(Message())
     assert controller.lowstate_rx_count == 1
     assert controller.snapshot.message.__class__ is Message
