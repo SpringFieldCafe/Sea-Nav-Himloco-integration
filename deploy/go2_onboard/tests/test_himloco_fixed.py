@@ -28,6 +28,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     build_target_q,
     configure_torch_runtime,
     require_performance_governor,
+    history_repeat_on_first_for_profile,
     advance_active_deadline,
     pose_transition_target,
     projected_gravity_from_wxyz,
@@ -123,6 +124,65 @@ def test_policy_history_can_be_primed_from_latest_pose():
     frames = observation.reshape(1, 6, 45)
     for index in range(1, 6):
         torch.testing.assert_close(frames[:, 0], frames[:, index])
+
+
+def test_legacy_history_starts_current_frame_then_five_zero_frames():
+    him = HIMLocoObservation(torch.device("cpu"))
+    command = [0.4, 0.0, 0.0]
+    gyro = [0.01, -0.02, 0.03]
+    gravity = [0.0, 0.0, -1.0]
+    q = DEFAULT_ANGLES + 0.01
+    dq = [0.1] * 12
+    assert history_repeat_on_first_for_profile("legacy_policy_1") is False
+    observation = build_observation(
+        him, command, gyro, gravity, q, dq,
+        repeat_history=history_repeat_on_first_for_profile("legacy_policy_1"),
+    )
+    frames = observation.reshape(1, 6, 45)
+    assert torch.count_nonzero(frames[:, 1:]) == 0
+
+    him.record_action(torch.ones((1, 12)))
+    second = build_observation(him, command, gyro, gravity, q, dq, repeat_history=False)
+    second_frames = second.reshape(1, 6, 45)
+    torch.testing.assert_close(second_frames[:, 1], frames[:, 0])
+    assert torch.count_nonzero(second_frames[:, 2:]) == 0
+
+
+def test_1460_history_initialization_remains_repeat_current():
+    assert history_repeat_on_first_for_profile("himloco_1460") is True
+
+
+def test_legacy_profile_matches_old_deploy_observation_and_action_fixture():
+    command = np.asarray([0.4, 0.0, 0.0], dtype=np.float32)
+    gyro = np.asarray([0.12, -0.07, 0.20], dtype=np.float32)
+    gravity = np.asarray([0.0, 0.0, -1.0], dtype=np.float32)
+    q = DEFAULT_ANGLES + np.linspace(-0.03, 0.03, 12, dtype=np.float32)
+    dq = np.linspace(-0.1, 0.1, 12, dtype=np.float32)
+    previous_action = np.zeros(12, dtype=np.float32)
+
+    old_frame = np.empty(45, dtype=np.float32)
+    old_frame[0:3] = command * np.asarray([2.0, 2.0, 0.25], dtype=np.float32)
+    old_frame[3:6] = gyro * 0.25
+    old_frame[6:9] = gravity
+    old_frame[9:21] = q - DEFAULT_ANGLES
+    old_frame[21:33] = dq * 0.05
+    old_frame[33:45] = previous_action
+    old_observation = np.concatenate(
+        [old_frame, np.zeros(5 * 45, dtype=np.float32)]
+    ).reshape(1, 270)
+
+    him = HIMLocoObservation(torch.device("cpu"))
+    current_observation = build_observation(
+        him, command, gyro, gravity, q, dq,
+        repeat_history=history_repeat_on_first_for_profile("legacy_policy_1"),
+    )
+    torch.testing.assert_close(current_observation, torch.from_numpy(old_observation))
+
+    policy = torch.jit.load("models/locomotion/himloco/policy_1.pt", map_location="cpu").eval()
+    with torch.inference_mode():
+        old_action = policy(torch.from_numpy(old_observation))
+        current_action = policy(current_observation)
+    torch.testing.assert_close(current_action, old_action)
 
 
 def test_joint_mapping_and_target_contract():
@@ -222,7 +282,7 @@ def test_startup_sequence_has_pose_transition_and_policy_gate():
     assert "POSE_TRANSITION_COMPLETE" in source
     assert "DEFAULT_POSE_HOLD" in source
     assert "HISTORY_INIT_SOURCE=latest_default_pose_lowstate" in source
-    assert "repeat_history=True" in source
+    assert "history_repeat_on_first_for_profile" in source
     assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
     assert "self.policy_durations" in source
     assert "self.control_periods" in source

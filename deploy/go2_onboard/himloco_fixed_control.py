@@ -227,6 +227,16 @@ def build_observation(
     return him_obs.build(command_t, gyro_t, gravity_t, q_t, dq_t, repeat_history=repeat_history)
 
 
+def history_repeat_on_first_for_profile(policy_profile: str) -> bool:
+    """Select the tested first-history contract for each approved policy."""
+    if policy_profile == "legacy_policy_1":
+        # Historical deploy_real_go2.py started with current frame + five zeros.
+        return False
+    if policy_profile == "himloco_1460":
+        return True
+    raise SafetyError(f"unknown approved policy profile: {policy_profile}")
+
+
 def decode_remote_keys(raw_remote) -> int:
     """Decode the SDK2 Go2 wireless_remote bit field used by the old entry."""
     raw = bytes(raw_remote)
@@ -772,6 +782,7 @@ class FixedHIMLocoController:
 
     def _initialize_policy_history(self, snapshot, command):
         gyro, gravity, q_policy, dq_policy = self._prepare_sensor(snapshot.message)
+        repeat_history = history_repeat_on_first_for_profile(self.policy_profile)
         build_observation(
             self.him_obs,
             command.as_array(),
@@ -779,9 +790,13 @@ class FixedHIMLocoController:
             gravity,
             q_policy,
             dq_policy,
-            repeat_history=True,
+            repeat_history=repeat_history,
         )
-        print("[safety] HISTORY_INIT_SOURCE=latest_default_pose_lowstate PREVIOUS_ACTION_INIT=zeros")
+        history_mode = "repeat_current" if repeat_history else "current_plus_five_zeros"
+        print(
+            "[safety] HISTORY_INIT_SOURCE=latest_default_pose_lowstate "
+            f"HISTORY_MODE={history_mode} PREVIOUS_ACTION_INIT=zeros"
+        )
 
     def _print_diagnostics(self, now):
         if now - self._last_summary < 1.0:
