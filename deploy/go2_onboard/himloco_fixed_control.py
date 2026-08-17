@@ -40,6 +40,8 @@ ARM_WAIT_TIMEOUT = 5.0
 ACTION_CLIP = 100.0
 ACTION_SCALE = 0.25
 POLICY_WARMUP_STEPS = 10
+TORCH_THREADS = 1
+TORCH_INTEROP_THREADS = 1
 KP = 20.0
 KD = 0.5
 COMMAND_SCALE = np.asarray([2.0, 2.0, 0.25], dtype=np.float32)
@@ -92,6 +94,15 @@ def sha256_file(path: str) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def configure_torch_runtime(threads=TORCH_THREADS, interop_threads=TORCH_INTEROP_THREADS):
+    """Use the measured single-thread setting for deterministic 50 Hz control."""
+    try:
+        torch.set_num_threads(int(threads))
+        torch.set_num_interop_threads(int(interop_threads))
+    except RuntimeError as exc:
+        raise SafetyError(f"unable to configure Torch realtime threads: {exc}") from exc
 
 
 def validate_fixed_command(vx: float, vy: float, wz: float) -> FixedCommand:
@@ -191,9 +202,14 @@ class FixedHIMLocoController:
         self.lowstate_rx_count = 0
         self.last_lowstate_rx = 0.0
         self.lowstate_intervals = deque(maxlen=512)
+        self.policy_durations = deque(maxlen=512)
+        self.publish_durations = deque(maxlen=512)
         self.last_policy_ms = 0.0
         self.last_publish_ms = 0.0
         self.loop_durations = deque(maxlen=512)
+        self.control_periods = deque(maxlen=512)
+        self.deadline_lateness = deque(maxlen=512)
+        self.deadline_miss_count = 0
         self._last_summary = 0.0
 
     def validate_model(self):
@@ -471,14 +487,40 @@ class FixedHIMLocoController:
         else:
             rx_rate, p50, p95 = 0.0, 0.0, 0.0
         loops = np.asarray(self.loop_durations, dtype=np.float64)
+        policies = np.asarray(self.policy_durations, dtype=np.float64)
+        publishes = np.asarray(self.publish_durations, dtype=np.float64)
+        periods = np.asarray(self.control_periods, dtype=np.float64)
+        lateness = np.asarray(self.deadline_lateness, dtype=np.float64)
         loop_p95 = float(np.percentile(loops, 95) * 1000.0) if loops.size else 0.0
+        policy_p95 = float(np.percentile(policies, 95) * 1000.0) if policies.size else 0.0
+        publish_p95 = float(np.percentile(publishes, 95) * 1000.0) if publishes.size else 0.0
+        period_values = periods * 1000.0
+        period_p50 = float(np.percentile(period_values, 50)) if periods.size else 0.0
+        period_p95 = float(np.percentile(period_values, 95)) if periods.size else 0.0
+        period_p99 = float(np.percentile(period_values, 99)) if periods.size else 0.0
+        period_max = float(np.max(period_values)) if periods.size else 0.0
+        rate = 1000.0 / period_p50 if period_p50 > 0.0 else 0.0
+        late_max = float(np.max(lateness) * 1000.0) if lateness.size else 0.0
         print(
             "[diagnostics] state=%s lowstate_rx=%d lowstate_rate_hz=%.1f "
             "rx_p50_ms=%.2f rx_p95_ms=%.2f age_ms=%.2f policy_ms=%.2f "
-            "publish_ms=%.2f loop_p95_ms=%.2f"
+            "policy_p95_ms=%.2f publish_ms=%.2f publish_p95_ms=%.2f "
+            "loop_p95_ms=%.2f control_rate_hz=%.2f period_p50_ms=%.2f "
+            "period_p95_ms=%.2f period_p99_ms=%.2f period_max_ms=%.2f "
+            "deadline_misses=%d max_deadline_lateness_ms=%.2f"
             % (self.state.value, rx_count, rx_rate, p50, p95, age_ms,
-               self.last_policy_ms, self.last_publish_ms, loop_p95)
+               self.last_policy_ms, policy_p95, self.last_publish_ms,
+               publish_p95, loop_p95, rate, period_p50, period_p95,
+               period_p99, period_max, self.deadline_miss_count, late_max)
         )
+
+    def _reset_active_metrics(self):
+        self.policy_durations.clear()
+        self.publish_durations.clear()
+        self.loop_durations.clear()
+        self.control_periods.clear()
+        self.deadline_lateness.clear()
+        self.deadline_miss_count = 0
 
     def run(self):
         pose_snapshot = self._wait_for_pose_arm()
@@ -487,21 +529,32 @@ class FixedHIMLocoController:
         policy_snapshot = self._wait_for_policy_arm()
         self._initialize_policy_history(policy_snapshot, self.args.command)
         self.state = RuntimeState.ACTIVE
+        self._reset_active_metrics()
         print(f"[safety] ACTIVE command={self.args.command.as_array().tolist()}")
 
         next_tick = time.monotonic()
+        previous_control_start = None
         while self.state == RuntimeState.ACTIVE:
             loop_start = time.monotonic()
+            if previous_control_start is not None:
+                self.control_periods.append(loop_start - previous_control_start)
+            previous_control_start = loop_start
             next_tick += CONTROL_DT
             snapshot = self._snapshot()
             self._check_runtime_safety(snapshot)
             policy_start = time.monotonic()
             self._run_policy_once(self.args.command, snapshot)
             self.last_policy_ms = (time.monotonic() - policy_start) * 1000.0
+            self.policy_durations.append(time.monotonic() - policy_start)
             publish_start = time.monotonic()
             self._send(self.low_cmd)
             self.last_publish_ms = (time.monotonic() - publish_start) * 1000.0
+            self.publish_durations.append(time.monotonic() - publish_start)
             self.loop_durations.append(time.monotonic() - loop_start)
+            lateness = max(0.0, time.monotonic() - next_tick)
+            self.deadline_lateness.append(lateness)
+            if lateness > 0.0:
+                self.deadline_miss_count += 1
             self._print_diagnostics(time.monotonic())
             sleep_time = next_tick - time.monotonic()
             if sleep_time > 0:
@@ -538,11 +591,19 @@ def build_parser():
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--wz", type=float, default=0.0)
     parser.add_argument("--max-sensor-age", type=float, default=STALE_MAX_AGE)
+    parser.add_argument("--torch-threads", type=int, choices=(1, 2, 4), default=TORCH_THREADS)
+    parser.add_argument(
+        "--torch-interop-threads",
+        type=int,
+        choices=(1, 2, 4),
+        default=TORCH_INTEROP_THREADS,
+    )
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    configure_torch_runtime(args.torch_threads, args.torch_interop_threads)
     args.command = validate_fixed_command(args.vx, args.vy, args.wz)
     controller = FixedHIMLocoController(args)
     try:

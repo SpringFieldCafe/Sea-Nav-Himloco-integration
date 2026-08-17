@@ -23,6 +23,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     SafetyError,
     build_observation,
     build_target_q,
+    configure_torch_runtime,
     pose_transition_target,
     projected_gravity_from_wxyz,
     sha256_file,
@@ -145,6 +146,20 @@ def test_startup_sequence_has_pose_transition_and_policy_gate():
     assert "DEFAULT_POSE_HOLD" in source
     assert "HISTORY_INIT_SOURCE=latest_default_pose_lowstate" in source
     assert "repeat_history=True" in source
+    assert "self.lowstate_subscriber.Init(self._low_state_callback, 0)" in source
+    assert "self.policy_durations" in source
+    assert "self.control_periods" in source
+    assert "deadline_miss_count" in source
+    assert "next_tick += CONTROL_DT" in source
+    assert "period_p99_ms" in source
+    assert "publish_p95_ms" in source
+
+
+def test_realtime_torch_defaults_are_single_threaded():
+    source = Path("deploy/go2_onboard/himloco_fixed_control.py").read_text(encoding="utf-8")
+    assert "TORCH_THREADS = 1" in source
+    assert "TORCH_INTEROP_THREADS = 1" in source
+    assert callable(configure_torch_runtime)
     transition = source.split("    def _move_to_default_pos", 1)[1].split("    def _wait_for_policy_arm", 1)[0]
     assert "self.policy" not in transition
 
@@ -171,3 +186,11 @@ def test_wait_for_pose_arm_keeps_waiting_after_first_fresh_lowstate():
     assert "if not self.watchdog.fresh" in wait_block
     assert "continue" in wait_block
     assert "if key_pressed(snapshot.remote_keys, self.POSE_ARM_KEY)" in wait_block
+
+
+def test_offline_benchmark_is_no_write_and_uses_current_policy_path():
+    source = Path("deploy/go2_onboard/himloco_offline_benchmark.py").read_text(encoding="utf-8")
+    assert "unitree_sdk2py" not in source
+    assert "ChannelPublisher" not in source
+    assert "LowCmd" not in source
+    assert "--steps" in source
