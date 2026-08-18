@@ -9,6 +9,49 @@ import numpy as np
 from .lidar_ray_adapter import LidarRayCache
 
 
+EXPECTED_ODOM_FRAME = "odom"
+EXPECTED_ODOM_CHILD_FRAME = "base_link"
+
+
+@dataclass
+class OdomFrameStats:
+    """Counters and validation for the expected odometry writer contract."""
+
+    expected_frame_id: str = EXPECTED_ODOM_FRAME
+    expected_child_frame_id: str = EXPECTED_ODOM_CHILD_FRAME
+    total_messages: int = 0
+    valid_frame_messages: int = 0
+    empty_frame_messages: int = 0
+    wrong_frame_messages: int = 0
+    wrong_child_frame_messages: int = 0
+
+    def accept(self, frame_id, child_frame_id):
+        self.total_messages += 1
+        frame_id = str(frame_id or "")
+        child_frame_id = str(child_frame_id or "")
+        if not frame_id:
+            self.empty_frame_messages += 1
+            return False
+        if frame_id != self.expected_frame_id:
+            self.wrong_frame_messages += 1
+            return False
+        if child_frame_id != self.expected_child_frame_id:
+            self.wrong_frame_messages += 1
+            self.wrong_child_frame_messages += 1
+            return False
+        self.valid_frame_messages += 1
+        return True
+
+    def summary(self):
+        return {
+            "total_messages": self.total_messages,
+            "valid_frame_messages": self.valid_frame_messages,
+            "empty_frame_messages": self.empty_frame_messages,
+            "wrong_frame_messages": self.wrong_frame_messages,
+            "wrong_child_frame_messages": self.wrong_child_frame_messages,
+        }
+
+
 @dataclass
 class Latest:
     value: object = None
@@ -105,6 +148,7 @@ class RosStateReader:
         self.lidar = Latest()
         self.lidar_cache = LidarRayCache()
         self.odom = Latest()
+        self.odom_frame_stats = OdomFrameStats()
         self.wireless = Latest()
         self.goal = Latest()
         self.node = rclpy.create_node("sea_nav_go2_shadow_runtime")
@@ -193,7 +237,7 @@ class RosStateReader:
         header = getattr(msg, "header", None)
         odom_frame = str(getattr(header, "frame_id", "") or "")
         odom_child_frame = str(getattr(msg, "child_frame_id", "") or "")
-        self._store(self.odom, OdomData(
+        value = OdomData(
             linear_velocity=np.asarray([twist.linear.x, twist.linear.y, twist.linear.z], dtype=np.float32),
             angular_velocity=np.asarray([twist.angular.x, twist.angular.y, twist.angular.z], dtype=np.float32),
             position=np.asarray([position.x, position.y, position.z], dtype=np.float32),
@@ -205,7 +249,24 @@ class RosStateReader:
             ], dtype=np.float32),
             frame_id=odom_frame,
             child_frame_id=odom_child_frame,
-        ), msg, frame_id=odom_frame, child_frame_id=odom_child_frame)
+        )
+        with self.lock:
+            if not self.odom_frame_stats.accept(odom_frame, odom_child_frame):
+                return
+            first_valid = self.odom_frame_stats.valid_frame_messages == 1
+            self._store(
+                self.odom,
+                value,
+                msg,
+                frame_id=odom_frame,
+                child_frame_id=odom_child_frame,
+            )
+        if first_valid:
+            print(
+                "[odom_source] "
+                f"accepted_frame='{odom_frame}' "
+                f"accepted_child='{odom_child_frame}'"
+            )
 
     def _wireless_callback(self, msg):
         self._store(self.wireless, msg, msg)
@@ -269,11 +330,13 @@ class RosStateReader:
                 if slot.value is not None:
                     values.append(slot.value if not hasattr(slot.value, "__dict__") else _dataclass_values(slot.value))
             ages = {name: slot.age for name, slot in slots.items()}
+            streams = {name: slot.summary() for name, slot in slots.items()}
+            streams["odom"].update(self.odom_frame_stats.summary())
             return {
                 "ages": ages,
                 "sensor_ages": {name: ages[name] for name in ("lowstate", "lidar", "odom", "wireless")},
                 "sensor_thresholds": thresholds,
-                "streams": {name: slot.summary() for name, slot in slots.items()},
+                "streams": streams,
                 "finite_values": values,
                 "wireless_emergency": wireless_emergency(self.wireless.value),
             }

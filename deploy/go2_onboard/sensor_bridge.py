@@ -236,6 +236,7 @@ def run(args):
             send_stats.add(send_ms)
             send_finished = time.perf_counter()
             rate_stats.observe(send_finished)
+            odom_stream = health["streams"]["odom"]
             record = {
                 "mode": "sensor_bridge", "timestamp": time.time(), "sequence": packet["sequence"],
                 "packet_validity": packet["validity"], "sensor_age": packet["sensor_age"],
@@ -247,6 +248,15 @@ def run(args):
                 "lidar_callback_processing_ms": timing["lidar_callback_processing_ms"],
                 "lidar_cache_processed_count": timing["lidar_cache_processed_count"],
                 "lidar_cache_source_timestamp": timing["lidar_cache_source_timestamp"],
+                "odom_total": odom_stream["total_messages"],
+                "odom_valid": odom_stream["valid_frame_messages"],
+                "odom_empty_frame_ignored": odom_stream["empty_frame_messages"],
+                "odom_wrong_frame_rejected": odom_stream["wrong_frame_messages"],
+                "odom_wrong_child_frame_rejected": odom_stream["wrong_child_frame_messages"],
+                "latest_valid_age_ms": (
+                    health["ages"]["odom"] * 1000.0
+                    if health["ages"]["odom"] is not None else None
+                ),
                 "ipc_encode_ms": encode_ms,
                 "ipc_send_ms": send_ms,
                 "log_write_ms": last_log_write_ms,
@@ -274,6 +284,14 @@ def run(args):
                     "send_p95_ms": send_stats.percentile(0.95),
                     "log_p95_ms": log_stats.percentile(0.95),
                     "deadline_misses": scheduler_deadline_misses,
+                    "odom_total": odom_stream["total_messages"],
+                    "odom_valid": odom_stream["valid_frame_messages"],
+                    "odom_empty_frame_ignored": odom_stream["empty_frame_messages"],
+                    "odom_wrong_frame_rejected": odom_stream["wrong_frame_messages"],
+                    "latest_valid_age_ms": (
+                        health["ages"]["odom"] * 1000.0
+                        if health["ages"]["odom"] is not None else None
+                    ),
                     "lowcmd_sent": False,
                 })
                 print("[sensor_bridge] " + json.dumps(summary, separators=(",", ":")))
