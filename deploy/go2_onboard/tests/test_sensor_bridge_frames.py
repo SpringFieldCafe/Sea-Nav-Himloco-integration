@@ -2,7 +2,7 @@ import pytest
 
 from deploy.go2_onboard.goal import Goal2D, GoalManager
 from deploy.go2_onboard.ros_state_reader import OdomFrameStats, is_fresh
-from deploy.go2_onboard.sensor_bridge import resolve_odom_frame
+from deploy.go2_onboard.sensor_bridge import odom_readiness, resolve_odom_frame
 
 
 def test_odom_frame_uses_callback_data_when_dataclass_frame_is_empty():
@@ -86,3 +86,21 @@ def test_interleaved_odom_frames_keep_valid_stream_count():
     assert stats.valid_frame_messages == 3
     assert stats.empty_frame_messages == 1
     assert stats.wrong_frame_messages == 1
+
+
+def test_odom_readiness_waits_without_a_valid_sample():
+    ready, state = odom_readiness(None, "", "", None, 0.10)
+    assert ready is False
+    assert state == "WAITING_FOR_ODOM"
+
+
+def test_odom_readiness_marks_old_valid_sample_stale():
+    ready, state = odom_readiness(object(), "odom", "base_link", 0.11, 0.10)
+    assert ready is False
+    assert state == "SENSOR_STALE"
+
+
+def test_odom_readiness_recovers_when_valid_sample_is_fresh():
+    ready, state = odom_readiness(object(), "odom", "base_link", 0.01, 0.10)
+    assert ready is True
+    assert state == "RUNNING"

@@ -11,7 +11,12 @@ import numpy as np
 
 from .goal import Goal2D, GoalManager
 from .ipc_schema import encode_packet, make_packet
-from .ros_state_reader import RosStateReader
+from .ros_state_reader import (
+    EXPECTED_ODOM_CHILD_FRAME,
+    EXPECTED_ODOM_FRAME,
+    RosStateReader,
+    is_fresh,
+)
 from .runtime import Topics, quat_to_gravity, quat_to_yaw
 from .timing import FixedRate, NumericStats, RateStats
 
@@ -40,6 +45,19 @@ def resolve_odom_frame(odom_frame, latest_frame, fallback=""):
 def duration_expired(started, duration, now):
     """Apply bridge duration only after the shadow worker has connected."""
     return started is not None and duration > 0.0 and now - started >= duration
+
+
+def odom_readiness(odom, frame_id, child_frame_id, age_s, max_age_s):
+    """Return whether odometry is safe to use for a goal transform."""
+    if (
+        odom is None
+        or frame_id != EXPECTED_ODOM_FRAME
+        or child_frame_id != EXPECTED_ODOM_CHILD_FRAME
+    ):
+        return False, "WAITING_FOR_ODOM"
+    if not is_fresh(age_s, max_age_s):
+        return False, "SENSOR_STALE"
+    return True, "RUNNING"
 
 
 class SensorBridge:
@@ -87,11 +105,19 @@ class SensorBridge:
             latest_odom_frame = self.reader.odom.frame_id
             latest_odom_child_frame = self.reader.odom.child_frame_id
             goal = self.goal_manager.current
+            odom_age = health["ages"]["odom"]
+            odom_ready, state = odom_readiness(
+                odom,
+                latest_odom_frame,
+                latest_odom_child_frame,
+                odom_age,
+                self.freshness["odom"],
+            )
         valid = {
             "lowstate": low is not None,
             "lidar": lidar is not None,
-            "odom": odom is not None,
-            "goal": goal is not None,
+            "odom": odom_ready,
+            "goal": goal is not None and odom_ready,
         }
         if low is None:
             low_quaternion = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -108,7 +134,7 @@ class SensorBridge:
         lidar_cache = self.reader.lidar_cache.snapshot()
         rays = lidar_cache["rays"] if lidar is not None else np.full((41,), 5.0, dtype=np.float32)
         lidar_cache_copy_ms = (time.perf_counter() - lidar_cache_start) * 1000.0
-        if odom is None:
+        if not odom_ready:
             linear = np.zeros(3, dtype=np.float32)
             odom_angular = np.zeros(3, dtype=np.float32)
             position = np.zeros(2, dtype=np.float32)
@@ -121,7 +147,7 @@ class SensorBridge:
             yaw = quat_to_yaw(low_quaternion)
             odom_frame = self._odom_frame(odom, latest_odom_frame)
         current_goal = self.goal_manager.current
-        if not self._printed_first_snapshot:
+        if not self._printed_first_snapshot and odom_ready:
             print(
                 "[frames] "
                 f"odom_header_frame='{odom_frame}' "
@@ -130,7 +156,7 @@ class SensorBridge:
                 f"base_frame='{self.args.base_frame}'"
             )
             self._printed_first_snapshot = True
-        if goal is None:
+        if goal is None or not odom_ready:
             goal_body = np.zeros(2, dtype=np.float32)
         else:
             goal_body = self.goal_manager.relative_xy(position, yaw, odom_frame, self.args.base_frame)
@@ -168,6 +194,11 @@ class SensorBridge:
             "lidar_callback_processing_ms": lidar_cache["processing_ms"],
             "lidar_cache_processed_count": lidar_cache["processed_count"],
             "lidar_cache_source_timestamp": lidar_cache["source_timestamp"],
+            "state": state,
+            "odom_available": odom is not None,
+            "odom_ready": odom_ready,
+            "odom_age_ms": odom_age * 1000.0 if odom_age is not None else None,
+            "goal_ready": goal is not None and odom_ready,
         }
 
     def close(self):
@@ -199,6 +230,7 @@ def run(args):
     previous_sleep_ms = 0.0
     last_log_write_ms = 0.0
     last_summary = time.monotonic()
+    last_state = None
     print(f"[sensor_bridge] listening socket={args.socket}")
     print("[safety] ROS sensor reader only; no Torch, LowCmd, SportClient, or write path")
     print(
@@ -220,6 +252,15 @@ def run(args):
                     continue
             cycle = time.perf_counter()
             packet, health, timing = bridge.snapshot()
+            if timing["state"] != last_state:
+                print(
+                    "[sensor_bridge] "
+                    f"state={timing['state']} "
+                    f"odom_available={str(timing['odom_available']).lower()} "
+                    f"odom_ready={str(timing['odom_ready']).lower()} "
+                    f"latest_valid_age_ms={timing['odom_age_ms']}"
+                )
+                last_state = timing["state"]
             snapshot_stats.add(timing["snapshot_build_ms"])
             lidar_stats.add(timing["lidar_processing_ms"])
             encode_start = time.perf_counter()
@@ -253,6 +294,10 @@ def run(args):
                 "odom_empty_frame_ignored": odom_stream["empty_frame_messages"],
                 "odom_wrong_frame_rejected": odom_stream["wrong_frame_messages"],
                 "odom_wrong_child_frame_rejected": odom_stream["wrong_child_frame_messages"],
+                "runtime_state": timing["state"],
+                "odom_available": timing["odom_available"],
+                "odom_ready": timing["odom_ready"],
+                "goal_ready": timing["goal_ready"],
                 "latest_valid_age_ms": (
                     health["ages"]["odom"] * 1000.0
                     if health["ages"]["odom"] is not None else None
@@ -276,7 +321,7 @@ def run(args):
             if schedule["deadline_miss"]:
                 scheduler_deadline_misses += 1
             if time.monotonic() - last_summary >= args.summary_interval:
-                summary = {"mode": "sensor_bridge", "state": "RUNNING", **rate_stats.summary()}
+                summary = {"mode": "sensor_bridge", "state": timing["state"], **rate_stats.summary()}
                 summary.update({
                     "snapshot_p95_ms": snapshot_stats.percentile(0.95),
                     "lidar_p95_ms": lidar_stats.percentile(0.95),
@@ -288,6 +333,9 @@ def run(args):
                     "odom_valid": odom_stream["valid_frame_messages"],
                     "odom_empty_frame_ignored": odom_stream["empty_frame_messages"],
                     "odom_wrong_frame_rejected": odom_stream["wrong_frame_messages"],
+                    "odom_available": timing["odom_available"],
+                    "odom_ready": timing["odom_ready"],
+                    "goal_ready": timing["goal_ready"],
                     "latest_valid_age_ms": (
                         health["ages"]["odom"] * 1000.0
                         if health["ages"]["odom"] is not None else None
