@@ -84,7 +84,7 @@ class Probe(Node):
     def __init__(self):
         super().__init__("go2_lidar_odometry_recovery_probe")
         self.counts = {key: 0 for key in TOPICS}
-        self.odom_frames = []
+        self.last_odom_frame = ("", "")
         self.create_subscription(PointCloud2, TOPICS["RAW_CLOUD"], self._raw_cloud, 10)
         self.create_subscription(Imu, TOPICS["RAW_IMU"], self._raw_imu, 10)
         self.create_subscription(PointCloud2, TOPICS["CLOUD_BASE"], self._cloud_base, 10)
@@ -101,31 +101,74 @@ class Probe(Node):
 
     def _odom(self, msg):
         self.counts["ROBOT_ODOM"] += 1
-        self.odom_frames.append((msg.header.frame_id, msg.child_frame_id))
+        self.last_odom_frame = (msg.header.frame_id, msg.child_frame_id)
 
 rclpy.init()
 node = Probe()
-deadline = time.monotonic() + 8.0
-while rclpy.ok() and time.monotonic() < deadline:
+probe_started = time.monotonic()
+startup_deadline = probe_started + 15.0
+derived_started = None
+baseline = None
+while rclpy.ok():
     rclpy.spin_once(node, timeout_sec=0.1)
+    now = time.monotonic()
+    if derived_started is None:
+        if node.counts["CLOUD_BASE"] > 0 and node.counts["ROBOT_ODOM"] > 0:
+            derived_started = now
+            baseline = dict(node.counts)
+            print("DERIVED_STARTUP_PASS=TRUE")
+            print("DERIVED_STARTUP_DELAY_MS=%.1f" % ((now - probe_started) * 1000.0))
+        elif now >= startup_deadline:
+            break
+    elif now - derived_started >= 15.0:
+        break
 
+probe_elapsed = max(time.monotonic() - probe_started, 1e-9)
 for key, topic in TOPICS.items():
     count = node.counts[key]
-    print("%s=%d rate_hz=%.3f" % (key, count, count / 8.0))
+    print("%s=%d rate_hz=%.3f" % (key, count, count / probe_elapsed))
 
-frames = [item for item in node.odom_frames if item[0] or item[1]]
-odom_frame = frames[-1][0] if frames else ""
-child_frame = frames[-1][1] if frames else ""
+if derived_started is not None:
+    stability_elapsed = max(time.monotonic() - derived_started, 1e-9)
+    cloud_base_after = node.counts["CLOUD_BASE"] - baseline["CLOUD_BASE"]
+    odom_after = node.counts["ROBOT_ODOM"] - baseline["ROBOT_ODOM"]
+    print("CLOUD_BASE_RATE_AFTER_15S=%.3f" % (cloud_base_after / stability_elapsed))
+    print("ROBOT_ODOM_RATE_AFTER_15S=%.3f" % (odom_after / stability_elapsed))
+    stability_pass = cloud_base_after > 0 and odom_after > 0
+else:
+    print("DERIVED_STARTUP_PASS=FALSE")
+    print("DERIVED_STARTUP_DELAY_MS=TIMEOUT")
+    print("CLOUD_BASE_RATE_AFTER_15S=0.000")
+    print("ROBOT_ODOM_RATE_AFTER_15S=0.000")
+    stability_pass = False
+
+odom_frame, child_frame = node.last_odom_frame
+odom_frame_valid = odom_frame == "odom" and child_frame == "base_link"
 print("ODOM_FRAME=%s" % odom_frame)
 print("ODOM_CHILD_FRAME=%s" % child_frame)
-print("ODOM_FRAME_VALID=%s" % str(odom_frame == "odom" and child_frame == "base_link").upper())
-
-result = all(node.counts[key] > 0 for key in TOPICS)
-print("RAW_LIDAR_STATUS=%s" % ("PASS" if node.counts["RAW_CLOUD"] > 0 and node.counts["RAW_IMU"] > 0 else "FAIL"))
-print("DERIVED_STATUS=%s" % ("PASS" if node.counts["CLOUD_BASE"] > 0 and node.counts["ROBOT_ODOM"] > 0 else "FAIL"))
-print("RESULT=%s" % ("PASS" if result and odom_frame == "odom" and child_frame == "base_link" else "FAIL"))
+print("ODOM_FRAME_VALID=%s" % str(odom_frame_valid).upper())
+raw_pass = node.counts["RAW_CLOUD"] > 0 and node.counts["RAW_IMU"] > 0
+startup_pass = derived_started is not None
+print("RAW_LIDAR_STATUS=%s" % ("PASS" if raw_pass else "FAIL"))
+print("DERIVED_STATUS=%s" % ("PASS" if startup_pass else "FAIL"))
+print("DERIVED_STABILITY_PASS=%s" % str(stability_pass).upper())
+if not raw_pass:
+    fail_stage = "WAIT_RAW_LIDAR"
+elif not startup_pass:
+    fail_stage = "WAIT_ROBOT_ODOM" if node.counts["ROBOT_ODOM"] == 0 else "WAIT_CLOUD_BASE"
+elif not odom_frame_valid:
+    fail_stage = "ODOM_FRAME"
+elif not stability_pass:
+    fail_stage = "STABILITY"
+else:
+    fail_stage = ""
+print("FAIL_STAGE=%s" % fail_stage)
+result = raw_pass and startup_pass and stability_pass and odom_frame_valid
+print("RESULT=%s" % ("PASS" if result else "FAIL"))
 node.destroy_node()
 rclpy.shutdown()
+if not result:
+    raise SystemExit(1)
 PY
 
 echo "[recovery] complete; log=$LOG_FILE"
