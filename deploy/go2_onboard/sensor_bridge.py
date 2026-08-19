@@ -185,6 +185,8 @@ class SensorBridge:
             goal_body=goal_body,
             sensor_age=ages,
             validity=valid,
+            odom_position=odom.position if odom_ready else None,
+            odom_yaw=yaw if odom_ready else None,
         )
         self.sequence += 1
         return packet, health, {

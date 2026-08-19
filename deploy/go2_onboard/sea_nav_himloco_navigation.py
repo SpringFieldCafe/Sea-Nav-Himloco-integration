@@ -31,7 +31,7 @@ from .himloco_fixed_control import (
 )
 from .ipc_schema import decode_packet
 from .model_loader import infer, load_navigation_policy
-from .navigation_observation import NavigationObservation
+from .navigation_observation import NavigationObservation, clear_lidar_observation
 
 
 DEFAULT_NAVIGATION_POLICY = "artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt"
@@ -103,6 +103,8 @@ def _packet_is_fresh(packet, freshness):
 
 
 def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, reached):
+    assume_clear_lidar = (args.get("assume_clear_lidar", False)
+                          if isinstance(args, dict) else args.assume_clear_lidar)
     fresh, reason = _packet_is_fresh(packet, {
         "lowstate": args.lowstate_max_age,
         "odom": args.odom_max_age,
@@ -155,6 +157,8 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
         )
     }
     command_tensor = torch.as_tensor(previous_command, dtype=torch.float32, device=device).reshape(1, 3)
+    if assume_clear_lidar:
+        packet_tensor["lidar_rays"] = torch.full_like(packet_tensor["lidar_rays"], 5.0)
     observation = nav_obs.build(
         packet_tensor["projected_gravity"],
         command_tensor,
@@ -163,6 +167,8 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
         packet_tensor["lidar_rays"],
         packet_tensor["goal_body"],
     )
+    if assume_clear_lidar:
+        observation = clear_lidar_observation(observation)
     inference_start = time.perf_counter()
     raw = infer(sea, observation, 3)[0].detach().cpu().numpy()
     inference_ms = (time.perf_counter() - inference_start) * 1000.0
@@ -410,6 +416,8 @@ def build_parser():
     parser.add_argument("--navigation-filter-alpha", type=float, default=0.15)
     parser.add_argument("--navigation-connect-timeout", type=float, default=10.0)
     parser.add_argument("--navigation-summary-interval", type=float, default=1.0)
+    parser.add_argument("--assume-clear-lidar", action="store_true",
+                        help="NO OBSTACLE AVOIDANCE: use 5m LiDAR rays")
     parser.add_argument("--navigation-log", default=DEFAULT_NAVIGATION_LOG)
     parser.add_argument("--goal-x", type=float, required=True)
     parser.add_argument("--goal-y", type=float, required=True)
@@ -454,6 +462,7 @@ def main(argv=None):
         "lowstate_max_age": args.max_sensor_age,
         "odom_max_age": 0.10,
         "lidar_max_age": 0.20,
+        "assume_clear_lidar": args.assume_clear_lidar,
     }
     navigation = NavigationProcess(config, mailbox)
     controller = SeaNavHimLocoController(args, navigation)

@@ -5,6 +5,26 @@ import time
 import numpy as np
 
 
+# Narrow masks fitted from repeated stationary cloud_base samples.  The
+# center cluster and the two side clusters are kept separate so nearby real
+# obstacles at x=0.35/0.50 remain visible.
+ROBOT_SELF_MASKS = (
+    (0.61, 0.65, -0.07, 0.07, -0.26, -0.22),
+    (0.36, 0.48, 0.19, 0.22, -0.26, -0.22),
+    (0.36, 0.48, -0.22, -0.19, -0.26, -0.22),
+)
+
+
+def is_robot_self_point(points):
+    points = np.asarray(points)
+    result = np.zeros(points.shape[:-1], dtype=bool)
+    for x_min, x_max, y_min, y_max, z_min, z_max in ROBOT_SELF_MASKS:
+        result |= ((points[..., 0] >= x_min) & (points[..., 0] <= x_max) &
+                   (points[..., 1] >= y_min) & (points[..., 1] <= y_max) &
+                   (points[..., 2] >= z_min) & (points[..., 2] <= z_max))
+    return result
+
+
 class LidarRayAdapter:
     """Project a body-frame point cloud into the 41 SEA-Nav rays.
 
@@ -40,6 +60,7 @@ class LidarRayAdapter:
         valid &= distance <= self.max_distance
         valid &= points[:, 2] >= self.min_z
         valid &= points[:, 2] <= self.max_z
+        valid &= ~torch.as_tensor(is_robot_self_point(points.detach().cpu().numpy()), device=points.device)
         angle = torch.atan2(points[:, 1], points[:, 0])
         valid &= angle >= self.angles[0] - self.bin_width / 2
         valid &= angle <= self.angles[-1] + self.bin_width / 2
@@ -81,6 +102,7 @@ class NumpyLidarRayAdapter:
         valid &= distance <= self.max_distance
         valid &= points[:, 2] >= self.min_z
         valid &= points[:, 2] <= self.max_z
+        valid &= ~is_robot_self_point(points)
         angle = np.arctan2(points[:, 1], points[:, 0])
         valid &= angle >= self.angles[0] - self.bin_width / 2
         valid &= angle <= self.angles[-1] + self.bin_width / 2

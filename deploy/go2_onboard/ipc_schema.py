@@ -34,6 +34,8 @@ def make_packet(
     sensor_age: Dict[str, Any],
     validity: Dict[str, bool],
     timestamp_wall: float,
+    odom_position=None,
+    odom_yaw=None,
 ) -> Dict[str, Any]:
     packet = {
         "schema_version": SCHEMA_VERSION,
@@ -51,6 +53,10 @@ def make_packet(
         "sensor_age": {str(k): _optional_float(v) for k, v in sensor_age.items()},
         "validity": {str(k): bool(v) for k, v in validity.items()},
     }
+    if odom_position is not None:
+        packet["odom_position"] = _array_shape(odom_position, (3,), "odom_position")
+    if odom_yaw is not None:
+        packet["odom_yaw"] = _finite_float(odom_yaw, "odom_yaw")
     validate_packet(packet)
     return packet
 
@@ -109,3 +115,17 @@ def _optional_float(value):
     if not math.isfinite(value):
         raise ValueError("sensor age must be finite or null")
     return value
+
+
+def _finite_float(value, name):
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    return value
+
+
+def _array_shape(value, shape, name):
+    array = np.asarray(value, dtype=np.float32)
+    if array.shape != shape or not np.isfinite(array).all():
+        raise ValueError(f"{name} must be finite with shape {shape}")
+    return array.tolist()

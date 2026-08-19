@@ -48,6 +48,16 @@ ARM_WAIT_TIMEOUT = 5.0
 ACTION_CLIP = 100.0
 ACTION_SCALE = 0.25
 POLICY_WARMUP_STEPS = 10
+
+
+def sport_mode_allows_low_level(status):
+    """Unitree ServiceList status=1 denotes the stopped sport service."""
+    return int(status) == 1
+
+
+def low_level_gate_allows(sport_status, motion_mode):
+    """Require both App-off status and an unowned MotionSwitcher mode."""
+    return sport_mode_allows_low_level(sport_status) and not str(motion_mode or "").strip()
 TORCH_THREADS = 1
 TORCH_INTEROP_THREADS = 1
 KP = 20.0
@@ -462,28 +472,43 @@ class FixedHIMLocoController:
         print(f"[model] sha256={actual} input=270 output=12 warmup={POLICY_WARMUP_STEPS}")
 
     def check_motion_owner(self):
-        """Refuse ARM when Unitree high-level motion service owns the robot."""
+        """Allow low-level control only when the read-only sport service is OFF."""
         try:
             from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
+            from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
         except ImportError as exc:
-            raise SafetyError("MotionSwitcherClient unavailable; refusing to ARM") from exc
-        client = MotionSwitcherClient()
-        client.SetTimeout(5.0)
-        client.Init()
-        result = client.CheckMode()
-        if isinstance(result, tuple):
-            code, data = result
-        else:
-            code, data = 0, result
-        if int(code) != 0:
-            raise SafetyError(f"MotionSwitcher CheckMode failed: {code}")
-        name = str((data or {}).get("name", "")) if isinstance(data, dict) else str(data or "")
-        if name:
+            raise SafetyError("read-only motion/sport status clients unavailable; refusing to ARM") from exc
+        switcher = MotionSwitcherClient()
+        switcher.SetTimeout(5.0)
+        switcher.Init()
+        motion_result = switcher.CheckMode()
+        motion_code, motion_data = motion_result if isinstance(motion_result, tuple) else (0, motion_result)
+        if int(motion_code) != 0:
+            raise SafetyError(f"MotionSwitcher CheckMode failed: {motion_code}")
+        motion_name = str((motion_data or {}).get("name", "")) if isinstance(motion_data, dict) else str(motion_data or "")
+
+        state = RobotStateClient()
+        state.SetTimeout(5.0)
+        state.Init()
+        service_code, services = state.ServiceList()
+        if int(service_code) != 0 or services is None:
+            raise SafetyError(f"RobotState ServiceList failed: {service_code}")
+        sport = next((item for item in services if str(item.name) == "sport_mode"), None)
+        if sport is None:
+            raise SafetyError("sport_mode status unavailable; refusing to ARM")
+        sport_status = int(sport.status)
+        print(f"[safety] SPORT_MODE_STATUS={sport_status} ({'OFF' if sport_status == 1 else 'ON/ACTIVE'})")
+        print(f"[safety] MOTION_SWITCHER_MODE={motion_name or '<none>'}")
+        if not sport_mode_allows_low_level(sport_status):
+            print("[safety] LOW_LEVEL_GATE=REFUSED sport_mode is ON")
+            raise SafetyError("sport_mode is ON; low-level control refused")
+        if not low_level_gate_allows(sport_status, motion_name):
+            print(f"[safety] LOW_LEVEL_GATE=REFUSED MotionSwitcher owns '{motion_name}'")
             raise SafetyError(
-                f"controller conflict: Unitree motion service owns '{name}'. "
-                "Release it manually and rerun; this program will not kill services."
+                f"controller conflict: Unitree motion service owns '{motion_name}'. "
+                "Release it manually; this program will not call ReleaseMode()."
             )
-        print("[safety] motion owner check: no high-level owner reported")
+        print("[safety] LOW_LEVEL_GATE=ALLOWED sport_mode is OFF; no ReleaseMode used")
 
     def connect(self):
         try:
@@ -914,9 +939,15 @@ class FixedHIMLocoController:
         self._reset_active_metrics()
         print(f"[safety] ACTIVE command={self.args.command.as_array().tolist()}")
 
+        hold_started = time.monotonic()
+        if self.args.hold_duration > 0.0:
+            print(f"[safety] ZERO_HOLD_TIMER_START duration={self.args.hold_duration:.1f}s")
         next_tick = time.monotonic()
         previous_control_start = None
         while self.state == RuntimeState.ACTIVE:
+            if self.args.hold_duration > 0.0 and time.monotonic() - hold_started >= self.args.hold_duration:
+                print("[safety] ZERO_HOLD_TIMER_COMPLETE")
+                break
             loop_start = time.monotonic()
             if previous_control_start is not None:
                 self.control_periods.append(loop_start - previous_control_start)
@@ -1051,6 +1082,8 @@ def build_parser():
         help="pose transition/default hold only; do not load or execute HIMLoco",
     )
     parser.add_argument("--comm-only-duration", type=float, default=10.0)
+    parser.add_argument("--hold-duration", type=float, default=0.0,
+                        help="seconds to run after A enters ACTIVE; 0 means until Ctrl+C")
     parser.add_argument("--torch-threads", type=int, choices=(1, 2, 4), default=TORCH_THREADS)
     parser.add_argument(
         "--torch-interop-threads",

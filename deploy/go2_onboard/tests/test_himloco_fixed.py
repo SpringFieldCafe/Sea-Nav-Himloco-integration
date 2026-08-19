@@ -33,10 +33,20 @@ from deploy.go2_onboard.himloco_fixed_control import (
     advance_active_deadline,
     pose_transition_target,
     projected_gravity_from_wxyz,
+    sport_mode_allows_low_level,
+    low_level_gate_allows,
     sha256_file,
     validate_fixed_command,
     advance_deadline,
 )
+
+
+def test_sport_mode_gate_uses_read_only_service_status():
+    assert sport_mode_allows_low_level(1)
+    assert not sport_mode_allows_low_level(0)
+    assert not low_level_gate_allows(1, "mcf")
+    assert low_level_gate_allows(1, "")
+    assert not low_level_gate_allows(0, "")
 from deploy.go2_onboard.himloco_observation import HIMLocoObservation
 
 

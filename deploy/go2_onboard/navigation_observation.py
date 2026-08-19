@@ -5,6 +5,16 @@ import torch
 from .history_buffer import HistoryBuffer
 
 
+def clear_lidar_observation(observation):
+    """Return a copy with all ten history frames encoded as clear 5m rays."""
+    result = observation.clone()
+    value = torch.log2(torch.tensor(5.0, device=result.device))
+    for frame in range(10):
+        start = frame * 55 + 12
+        result[:, start:start + 41] = value
+    return result
+
+
 class NavigationObservation:
     """Builds the exact SEA-Nav 55D frame and 10-frame 550D history."""
 

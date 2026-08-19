@@ -13,7 +13,7 @@ from .himloco_observation import HIMLocoObservation
 from .ipc_schema import decode_packet
 from .joint_mapping import make_policy_to_motor
 from .model_loader import infer, load_himloco_policy, load_navigation_policy
-from .navigation_observation import NavigationObservation
+from .navigation_observation import NavigationObservation, clear_lidar_observation
 from .timing import NumericStats, RateStats
 
 
@@ -31,6 +31,9 @@ def dump_sea_observation(path, observation, packet):
         "sequence": int(packet["sequence"]),
         "shape": list(observation.shape),
         "goal_body": [float(value) for value in packet["goal_body"]],
+        "odom_position": packet.get("odom_position"),
+        "odom_yaw": packet.get("odom_yaw"),
+        "lidar_rays": [float(value) for value in packet.get("lidar_rays", [])],
         "sea_observation": observation.detach().cpu().tolist(),
         "sea_observation_finite": bool(torch.isfinite(observation).all()),
         "history_order": "oldest_to_newest",
@@ -43,6 +46,13 @@ def dump_sea_observation(path, observation, packet):
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
     return payload
+
+
+def snapshot_path(path, index, count):
+    output = Path(path)
+    if count <= 1:
+        return output
+    return output.parent / f"{output.stem}_{index:02d}{output.suffix or '.json'}"
 
 
 def run(args):
@@ -86,7 +96,8 @@ def run(args):
     last_summary = time.monotonic()
     deadline_miss_count = 0
     shadow_samples = 0
-    sea_snapshot_dumped = False
+    sea_snapshot_count = 0
+    last_sea_snapshot_at = None
     try:
         while args.duration <= 0 or time.monotonic() - started < args.duration:
             receive_start = time.perf_counter()
@@ -113,7 +124,7 @@ def run(args):
                 loop_start = time.perf_counter()
                 record, last_command, sea_observation = process_packet(
                     packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device,
-                    last_command, freshness,
+                    last_command, freshness, args.assume_clear_lidar,
                 )
                 loop_latency_ms = (time.perf_counter() - loop_start) * 1000.0
                 loop_total_ms = (time.perf_counter() - packet_start) * 1000.0
@@ -126,13 +137,28 @@ def run(args):
                     sea_inference_stats.add(record["sea_inference_latency_ms"])
                     him_obs_stats.add(record["him_obs_build_ms"])
                     him_inference_stats.add(record["him_inference_latency_ms"])
+                    now_monotonic = time.monotonic()
+                    interval_ready = (
+                        last_sea_snapshot_at is None
+                        or now_monotonic - last_sea_snapshot_at >= args.dump_sea_observation_interval_s
+                    )
                     if (
                         args.dump_sea_observation
-                        and not sea_snapshot_dumped
+                        and sea_snapshot_count < args.dump_sea_observation_count
                         and shadow_samples >= args.dump_sea_observation_after_samples
+                        and interval_ready
                     ):
-                        dump_sea_observation(args.dump_sea_observation, sea_observation, packet)
-                        sea_snapshot_dumped = True
+                        sea_snapshot_count += 1
+                        dump_sea_observation(
+                            snapshot_path(
+                                args.dump_sea_observation,
+                                sea_snapshot_count,
+                                args.dump_sea_observation_count,
+                            ),
+                            sea_observation,
+                            packet,
+                        )
+                        last_sea_snapshot_at = now_monotonic
                 loop_stats.add(loop_latency_ms)
                 record.update({
                     "mode": "shadow_worker",
@@ -181,7 +207,7 @@ def run(args):
 
 
 def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, device,
-                   last_command, freshness):
+                   last_command, freshness, assume_clear_lidar=False):
     required = packet["validity"]
     if not all(required.get(name, False) for name in ("lowstate", "lidar", "odom", "goal")):
         return ({"runtime_state": "STALE_SENSOR", "fault_reason": "invalid_or_missing_sensor", "lowcmd_sent": False}, last_command, None)
@@ -196,6 +222,8 @@ def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, 
     torch_packet = {key: torch.as_tensor(packet[key], dtype=torch.float32, device=device).reshape(1, -1)
                     for key in ("joint_pos", "joint_vel", "imu_ang_vel", "projected_gravity",
                                 "base_linear_velocity_body", "base_angular_velocity_body", "lidar_rays", "goal_body")}
+    if assume_clear_lidar:
+        torch_packet["lidar_rays"] = torch.full_like(torch_packet["lidar_rays"], 5.0)
     q_policy = torch_packet["joint_pos"][:, policy_to_motor]
     dq_policy = torch_packet["joint_vel"][:, policy_to_motor]
     sea_obs_start = time.perf_counter()
@@ -204,6 +232,8 @@ def process_packet(packet, sea, him, nav_obs, him_obs, bridge, policy_to_motor, 
         torch_packet["base_linear_velocity_body"], torch_packet["base_angular_velocity_body"],
         torch_packet["lidar_rays"], torch_packet["goal_body"],
     )
+    if assume_clear_lidar:
+        nav_input = clear_lidar_observation(nav_input)
     sea_obs_build_ms = (time.perf_counter() - sea_obs_start) * 1000.0
     nav_start = time.perf_counter()
     nav_raw = infer(sea, nav_input, 3)
@@ -259,11 +289,19 @@ def build_parser():
     parser.add_argument("--himloco-policy", default=DEFAULT_HIM)
     parser.add_argument("--dump-sea-observation", default=None)
     parser.add_argument("--dump-sea-observation-after-samples", type=int, default=100)
+    parser.add_argument("--dump-sea-observation-count", type=int, default=1)
+    parser.add_argument("--dump-sea-observation-interval-s", type=float, default=0.0)
+    parser.add_argument("--assume-clear-lidar", action="store_true",
+                        help="NO OBSTACLE AVOIDANCE: use 5m LiDAR rays")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.dump_sea_observation_count < 1:
+        raise SystemExit("--dump-sea-observation-count must be positive")
+    if args.dump_sea_observation_interval_s < 0.0:
+        raise SystemExit("--dump-sea-observation-interval-s must be non-negative")
     run(args)
 
 

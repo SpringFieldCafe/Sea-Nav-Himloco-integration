@@ -20,7 +20,7 @@ from deploy.go2_onboard.ipc_schema import decode_packet, encode_packet, make_pac
 from deploy.go2_onboard.joint_mapping import make_motor_to_policy, make_policy_to_motor
 from deploy.go2_onboard.lidar_ray_adapter import LidarRayAdapter, LidarRayCache, NumpyLidarRayAdapter
 from deploy.go2_onboard.model_loader import load_himloco_policy, load_navigation_policy
-from deploy.go2_onboard.navigation_observation import NavigationObservation
+from deploy.go2_onboard.navigation_observation import NavigationObservation, clear_lidar_observation
 from deploy.go2_onboard.diagnostics import _ros_value
 from deploy.go2_onboard.ros_state_reader import Latest, is_fresh
 from deploy.go2_onboard.runtime import _health_for_log
@@ -48,6 +48,41 @@ def test_lidar_preprocessing_is_41_rays_and_clipped():
     assert float(rays.min()) >= 0.1
     assert float(rays.max()) <= 5.0
     assert float(rays[0, 20]) == pytest.approx(0.2)
+
+
+def test_lidar_self_filter_removes_measured_front_self_cluster_only():
+    adapter = NumpyLidarRayAdapter()
+    points = np.asarray([
+        [0.63, 0.04, -0.24],  # measured center self-return region
+        [0.42, 0.20, -0.24],  # measured side self-return region
+        [0.35, 0.00, -0.24],  # real front obstacle, must remain
+        [0.50, 0.00, -0.24],  # real front obstacle, must remain
+        [4.00, 0.00, 0.00],   # distant point
+    ], dtype=np.float32)
+    rays = adapter.project(points)[0]
+    assert rays[20] == pytest.approx(0.35)
+    assert rays.shape == (41,)
+    assert rays[20] < 1.0
+    assert rays[20] == pytest.approx(0.35)
+
+
+def test_lidar_self_filter_preserves_external_same_distance_point():
+    adapter = NumpyLidarRayAdapter()
+    points = np.asarray([[0.42, 0.30, -0.21]], dtype=np.float32)
+    rays = adapter.project(points)[0]
+    assert rays[int(round((math.radians(35.0) - (-2.0 * math.pi / 3.0)) / ((4.0 * math.pi / 3.0) / 40.0)))] == pytest.approx(0.516, abs=0.01)
+
+
+def test_assume_clear_lidar_preserves_history_and_replaces_ray_encoding():
+    observation = torch.arange(550, dtype=torch.float32).reshape(1, 550)
+    cleared = clear_lidar_observation(observation)
+    assert tuple(cleared.shape) == (1, 550)
+    clear_value = torch.log2(torch.tensor(5.0))
+    for frame in range(10):
+        start = frame * 55
+        torch.testing.assert_close(cleared[0, start + 12:start + 53], torch.full((41,), clear_value))
+        torch.testing.assert_close(cleared[0, start:start + 12], observation[0, start:start + 12])
+        torch.testing.assert_close(cleared[0, start + 53:start + 55], observation[0, start + 53:start + 55])
 
 
 def test_lidar_cache_processes_each_message_once_and_reuses_snapshot():
