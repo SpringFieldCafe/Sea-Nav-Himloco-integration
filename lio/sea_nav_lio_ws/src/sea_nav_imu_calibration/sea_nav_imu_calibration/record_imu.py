@@ -103,7 +103,7 @@ def main():
     parent = os.path.dirname(os.path.abspath(args.output))
     os.makedirs(parent, exist_ok=True)
 
-    start = time.monotonic()
+    exit_code = 0
     node = None
     try:
         with open(args.output, 'w', newline='') as output_file:
@@ -111,6 +111,16 @@ def main():
             writer.writeheader()
             rclpy.init(args=sys.argv)
             node = ImuRecorder(args.topic, writer)
+            publisher_deadline = time.monotonic() + 5.0
+            while rclpy.ok() and node.count_publishers(args.topic) == 0:
+                if time.monotonic() >= publisher_deadline:
+                    print('PUBLISHER_COUNT = 0')
+                    print('ERROR = NO IMU PUBLISHER DISCOVERED')
+                    exit_code = 2
+                    return exit_code
+                rclpy.spin_once(node, timeout_sec=0.1)
+            print('PUBLISHER_COUNT = %d' % node.count_publishers(args.topic))
+            start = time.monotonic()
             while rclpy.ok():
                 if args.duration is not None and time.monotonic() - start >= args.duration:
                     break
@@ -118,18 +128,26 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        elapsed = time.monotonic() - start
+        elapsed = time.monotonic() - start if 'start' in locals() else 0.0
         if node is not None:
             print('SAMPLE_COUNT = %d' % node.sample_count)
             print('DURATION = %.6f' % elapsed)
             print('MEAN_RATE_HZ = %.6f' % (node.sample_count / elapsed if elapsed else 0.0))
-            print('STAMP_MONOTONIC = receive_monotonic_time')
+            print('STAMP_MONOTONIC = YES')
             print('NAN_COUNT = %d' % node.nan_count)
             print('INF_COUNT = %d' % node.inf_count)
+            if node.sample_count == 0:
+                print('ERROR = NO IMU USER DATA RECEIVED')
+                exit_code = max(exit_code, 1)
+            elif node.sample_count / elapsed < 50.0:
+                print('WARNING = IMU_RATE_BELOW_50HZ')
+            elif node.sample_count / elapsed > 200.0:
+                print('RATE_OK = YES')
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+    return exit_code
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
