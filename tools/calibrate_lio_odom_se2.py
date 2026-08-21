@@ -182,7 +182,9 @@ def yaml_text(result):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
-    parser.add_argument("--output-yaml", required=True)
+    parser.add_argument("--output-yaml")
+    parser.add_argument("--calibration-yaml")
+    parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--validation-fraction", type=float, default=0.25)
     parser.add_argument("--max-stride", type=int, default=20)
     parser.add_argument("--min-translation-m", type=float, default=0.03)
@@ -198,12 +200,63 @@ def load_records(path):
     return records
 
 
+def load_calibration_yaml(path):
+    """Read the scalar YAML emitted by this tool without requiring PyYAML."""
+    values = {}
+    for line in Path(path).expanduser().read_text(encoding="utf-8").splitlines():
+        if ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        try:
+            values[key.strip()] = float(raw_value.strip())
+        except ValueError:
+            continue
+    keys = ("base_to_lio_x_m", "base_to_lio_y_m", "base_to_lio_yaw_rad")
+    missing = [key for key in keys if key not in values]
+    if missing:
+        raise ValueError(f"calibration YAML missing keys: {', '.join(missing)}")
+    return np.asarray([values[key] for key in keys], dtype=np.float64)
+
+
+def require_validation_motion(coverage):
+    if coverage["translation_pairs"] == 0:
+        raise ValueError("validation trajectory has no qualifying translation")
+    signed = coverage["left_right_signed_yaw_pairs"]
+    if signed["positive"] == 0 or signed["negative"] == 0:
+        raise ValueError("validation trajectory must contain both rotation directions")
+
+
 def run(args):
-    if not 0.1 <= args.validation_fraction < 0.5:
+    if not args.validate_only and not 0.1 <= args.validation_fraction < 0.5:
         raise ValueError("validation-fraction must be in [0.1, 0.5)")
     records = load_records(args.input)
     if len(records) < 20:
         raise ValueError("at least 20 synchronized records are required")
+
+    if args.validate_only:
+        solution = load_calibration_yaml(args.calibration_yaml)
+        pairs = planar_motion_pairs(
+            records, args.max_stride, args.min_translation_m,
+            math.radians(args.min_yaw_deg),
+        )
+        coverage = motion_coverage(pairs)
+        require_validation_motion(coverage)
+        inverse = inverse_se2(transform_from_se2(solution))
+        inverse_parameters = np.asarray((
+            inverse[0, 2], inverse[1, 2], math.atan2(inverse[1, 0], inverse[0, 0])
+        ))
+        result = {
+            "validate_only": True,
+            "calibration_yaml": str(Path(args.calibration_yaml).expanduser()),
+            "input_records": len(records),
+            "solution": solution.tolist(),
+            "solution_inverse": inverse_parameters.tolist(),
+            "validation_motion_coverage": coverage,
+            "validation_residual": residuals(pairs, solution),
+        }
+        print(json.dumps(result, indent=2))
+        return result
+
     split = int(len(records) * (1.0 - args.validation_fraction))
     train_records, validation_records = records[:split], records[split:]
     train_pairs = planar_motion_pairs(
@@ -239,6 +292,10 @@ def run(args):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
+        if args.validate_only and not args.calibration_yaml:
+            raise ValueError("--calibration-yaml is required with --validate-only")
+        if not args.validate_only and not args.output_yaml:
+            raise ValueError("--output-yaml is required unless --validate-only is used")
         run(args)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise SystemExit(f"calibration failed: {exc}") from exc

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -28,6 +29,44 @@ from deploy.go2_onboard.safety_supervisor import RuntimeState, SafetySupervisor,
 from deploy.go2_onboard.sensor_bridge import duration_expired
 from deploy.go2_onboard.shadow_worker import dump_sea_observation
 from deploy.go2_onboard.timing import FixedRate, RateStats
+
+
+def test_go2_point_lio_uses_complete_transformed_raw_imu():
+    config = Path("lio/sea_nav_lio_ws/src/point_lio_unilidar/config/sea_nav_go2.yaml")
+    source = config.read_text(encoding="utf-8")
+    assert 'imu_topic: "/sea_nav/lio/transformed_raw_imu"' in source
+    assert 'imu_topic: "/sea_nav/lio/transformed_imu"' not in source
+
+    transform = Path(
+        "lio/sea_nav_lio_ws/src/transform_sensors/transform_sensors/transform_everything.py"
+    ).read_text(encoding="utf-8")
+    assert "self.imu_raw_pub.publish(transformed_imu)" in transform
+    assert "transformed_imu.linear_acceleration.x = 0.0" in transform
+    assert "transformed_imu.angular_velocity = transformed_angular_velocity" in transform
+
+
+def test_lio_selfcheck_has_fail_closed_transformed_raw_imu_gate():
+    source = Path("tools/go2_lio_selfcheck.sh").read_text(encoding="utf-8")
+    assert 'check_imu_stream()' in source
+    assert 'local topic="$1" label="$2" expected_frame="$3"' in source
+    assert "check_imu_stream /utlidar/imu RAW_IMU" in source
+    assert "check_transformed_raw_imu" in source
+    assert "wait_for_transformed_raw_imu" in source
+    assert "WAITING_TRANSFORMED_RAW_IMU" in source
+    assert "TRANSFORMED_RAW_IMU_PUBLISHER=PASS" in source
+    assert "RAW_IMU" in source
+    assert "TRANSFORMED_RAW_IMU=PASS" in source
+    assert "POINT_LIO_START_BLOCKED" in source
+    assert "IMU_TIMESTAMP_MONOTONIC=PASS" in source
+    assert source.index("check_imu_stream /utlidar/imu RAW_IMU") < source.index('start_or_reuse_point')
+    point_start = source.index('start_terminal "Go2 Point-LIO')
+    assert point_start < source.index("wait_for_transformed_raw_imu", point_start)
+
+
+def test_lio_launcher_has_stale_supervisor_fail_closed_check():
+    source = Path("tools/go2_nav_start.sh").read_text(encoding="utf-8")
+    assert "STALE_SUPERVISOR" in source
+    assert "existing_selfcheck_supervisors" in source
 
 
 def test_goal_transform_global_to_body_and_body_goal():
@@ -301,6 +340,99 @@ def test_sensor_bridge_duration_starts_after_worker_connection():
     assert "started = None" in source
     assert "started = time.monotonic()" in source
     assert "connection, _ = server.accept()" in source
+
+
+def test_forward_goal_status_contract_fixture():
+    x, y, yaw, forward = -1.526054459, 0.343810399, 0.0, 0.50
+    goal_x = x + forward * math.cos(math.radians(yaw))
+    goal_y = y + forward * math.sin(math.radians(yaw))
+    assert goal_x == pytest.approx(-1.026054459, abs=1e-9)
+    assert goal_y == pytest.approx(0.343810399, abs=1e-9)
+
+    yaw = math.radians(90.0)
+    assert x + forward * math.cos(yaw) == pytest.approx(x, abs=1e-9)
+    assert y + forward * math.sin(yaw) == pytest.approx(y + 0.50, abs=1e-9)
+
+    selfcheck = Path("tools/go2_lio_selfcheck.sh").read_text(encoding="utf-8")
+    launcher = Path("tools/go2_nav_start.sh").read_text(encoding="utf-8")
+    assert "GOAL_MODE=FORWARD" in selfcheck
+    assert "CURRENT_YAW_DEG=%s" in selfcheck
+    assert "rclpy.spin_once" in selfcheck
+    assert "FORWARD_ODOM_READ_ATTEMPTS" in selfcheck
+    assert "contextlib.redirect_stdout" in selfcheck
+    assert "FORWARD_ODOM_PARSE_FAILED" in selfcheck
+    assert "LAUNCH_PGID" in selfcheck
+    assert "setsid ros2 launch" in selfcheck
+    assert "point_lio_process_tree" in selfcheck
+
+
+def test_lio_cleanup_distinguishes_live_processes_and_zombies():
+    selfcheck = Path("tools/go2_lio_selfcheck.sh").read_text(encoding="utf-8")
+    launcher = Path("tools/go2_nav_start.sh").read_text(encoding="utf-8")
+    assert "POINT_LIO_GROUP_AFTER_SIGINT" in selfcheck
+    assert "POINT_LIO_GROUP_AFTER_SIGTERM" in selfcheck
+    assert "POINT_LIO_GROUP_AFTER_SIGKILL" in selfcheck
+    assert "ZOMBIE_WAITING_REAP" in selfcheck
+    assert "STAT=$stat" in selfcheck
+    assert "SELF_CHECK_CLEANUP=FAIL" in launcher
+    assert "CLEAN_SHUTDOWN=FAIL" in launcher
+    assert "GOAL_STATUS_FILE=" in launcher
+    assert "GOAL_STATUS_CONTENT_BEGIN" in launcher
+
+
+def test_sensor_bridge_handles_signal_shutdown_without_executor_traceback():
+    bridge_source = Path("deploy/go2_onboard/sensor_bridge.py").read_text(encoding="utf-8")
+    reader_source = Path("deploy/go2_onboard/ros_state_reader.py").read_text(encoding="utf-8")
+    assert "signal.SIGTERM" in bridge_source
+    assert "stop_requested" in bridge_source
+    assert "bridge.close()" in bridge_source
+    assert "ExternalShutdownException" in reader_source
+    assert "def _spin_loop" in reader_source
+    assert "spin_thread.join" in reader_source
+
+
+def test_ros_reader_shutdown_smoke_is_ordered_and_idempotent():
+    from deploy.go2_onboard.ros_state_reader import RosStateReader
+
+    class FakeExternalShutdown(Exception):
+        pass
+
+    class FakeExecutor:
+        def __init__(self):
+            self.stop = threading.Event()
+
+        def add_node(self, _node):
+            pass
+
+        def spin(self):
+            self.stop.wait(2.0)
+
+        def shutdown(self, timeout_sec=1.0):
+            assert timeout_sec == 1.0
+            self.stop.set()
+
+    class FakeNode:
+        def destroy_node(self):
+            pass
+
+    reader = RosStateReader.__new__(RosStateReader)
+    reader._closed = False
+    reader._close_requested = False
+    reader._spin_error = None
+    reader._executor = None
+    reader._spin_thread = None
+    reader._executor_type = FakeExecutor
+    reader._external_shutdown_exception = FakeExternalShutdown
+    reader.node = FakeNode()
+    reader._owns_rclpy = False
+    reader._rclpy = None
+
+    reader.start_background_spin()
+    assert reader._spin_thread.is_alive()
+    reader.close()
+    reader.close()
+    assert reader._spin_thread is None
+    assert reader._executor is None
 
 
 def test_timing_stats_report_target_rate_and_percentiles():

@@ -3,7 +3,9 @@
 import argparse
 import json
 import os
+import signal
 import socket
+import threading
 import time
 from pathlib import Path
 
@@ -216,6 +218,17 @@ def run(args):
     server.settimeout(0.5)
     bridge = SensorBridge(args)
     bridge.reader.start_background_spin()
+    stop_requested = threading.Event()
+
+    def request_stop(_signum, _frame):
+        stop_requested.set()
+
+    previous_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
     started = None
     if args.log:
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
@@ -242,7 +255,7 @@ def run(args):
         f"goal_frame='{args.goal_frame}' base_frame='{args.base_frame}'"
     )
     try:
-        while not duration_expired(started, args.duration, time.monotonic()):
+        while not stop_requested.is_set() and not duration_expired(started, args.duration, time.monotonic()):
             if connection is None:
                 try:
                     connection, _ = server.accept()
@@ -347,18 +360,22 @@ def run(args):
                 print("[sensor_bridge] " + json.dumps(summary, separators=(",", ":")))
                 last_summary = time.monotonic()
     except KeyboardInterrupt:
-        print("[sensor_bridge] stopped")
+        stop_requested.set()
     finally:
+        if stop_requested.is_set():
+            print("[sensor_bridge] stop requested")
         if connection is not None:
             connection.close()
-        server.close()
         bridge.close()
+        server.close()
         if log:
             log.close()
         try:
             os.unlink(args.socket)
         except FileNotFoundError:
             pass
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def build_parser():

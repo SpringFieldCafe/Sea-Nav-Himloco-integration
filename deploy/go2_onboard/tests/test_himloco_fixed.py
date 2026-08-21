@@ -118,6 +118,20 @@ def test_approved_hash_with_wrong_shape_fails(monkeypatch, tmp_path):
         controller.validate_model()
 
 
+def test_policy_override_does_not_bypass_shape_gate(tmp_path):
+    wrong_policy = tmp_path / "override_wrong_shape.pt"
+    module = torch.nn.Linear(EXPECTED_INPUT_DIM, EXPECTED_OUTPUT_DIM - 1)
+    traced = torch.jit.trace(module.eval(), torch.zeros((1, EXPECTED_INPUT_DIM)))
+    traced.save(str(wrong_policy))
+    controller = object.__new__(FixedHIMLocoController)
+    controller.args = SimpleNamespace(
+        policy=str(wrong_policy),
+        allow_policy_override=True,
+    )
+    with pytest.raises(SafetyError, match="270->12"):
+        controller.validate_model()
+
+
 def test_fixed_observation_is_270_and_newest_first():
     him = HIMLocoObservation(torch.device("cpu"))
     observation = build_observation(

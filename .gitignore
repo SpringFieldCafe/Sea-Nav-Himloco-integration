@@ -151,9 +151,18 @@ cython_debug/
 
 # Project specific
 logs/
+# ROS 2 / colcon generated workspace outputs
+**/build_*/
+**/install/
+**/install_*/
+**/log_*/
+**/log/
 MUJOCO_LOG.TXT
 *.mp4
 wandb/
+
+# Local machine-only Go2 shadow launchers
+local/go2_shadow/
 
 # Policies, checkpoints, and experiment artifacts
 *.jit

@@ -128,7 +128,7 @@ class RosStateReader:
 
     def __init__(self, topics, max_sensor_age=0.25):
         import rclpy
-        from rclpy.executors import SingleThreadedExecutor
+        from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
         from nav_msgs.msg import Odometry
         from sensor_msgs.msg import PointCloud2
         from unitree_go.msg import LowState, WirelessController
@@ -139,6 +139,10 @@ class RosStateReader:
         self.lock = threading.RLock()
         self._executor = None
         self._spin_thread = None
+        self._external_shutdown_exception = ExternalShutdownException
+        self._close_requested = False
+        self._closed = False
+        self._spin_error = None
         self.max_sensor_age = float(max_sensor_age)
         if not rclpy.ok():
             rclpy.init(args=None)
@@ -287,27 +291,54 @@ class RosStateReader:
 
     def start_background_spin(self):
         """Continuously service ROS callbacks while callers read latest snapshots."""
+        if self._closed:
+            raise RuntimeError("ROS state reader is already closed")
         if self._executor is not None:
             return
+        self._close_requested = False
+        self._spin_error = None
         self._executor = self._executor_type()
         self._executor.add_node(self.node)
         self._spin_thread = threading.Thread(
-            target=self._executor.spin,
+            target=self._spin_loop,
             name="go2-ros-callbacks",
             daemon=True,
         )
         self._spin_thread.start()
 
+    def _spin_loop(self):
+        executor = self._executor
+        try:
+            executor.spin()
+        except self._external_shutdown_exception:
+            if not self._close_requested:
+                self._spin_error = "ExternalShutdownException"
+        except Exception as exc:
+            if not self._close_requested:
+                self._spin_error = repr(exc)
+
     def close(self):
-        if self._executor is not None:
-            self._executor.shutdown(timeout_sec=1.0)
-            if self._spin_thread is not None:
-                self._spin_thread.join(timeout=2.0)
-            self._executor = None
-            self._spin_thread = None
-        self.node.destroy_node()
+        if self._closed:
+            return
+        self._closed = True
+        self._close_requested = True
+        executor = self._executor
+        spin_thread = self._spin_thread
+        if executor is not None:
+            try:
+                executor.shutdown(timeout_sec=1.0)
+            except Exception:
+                pass
+        try:
+            self.node.destroy_node()
+        except Exception:
+            pass
         if self._owns_rclpy and self._rclpy.ok():
             self._rclpy.shutdown()
+        if spin_thread is not None and spin_thread is not threading.current_thread():
+            spin_thread.join(timeout=2.0)
+        self._executor = None
+        self._spin_thread = None
 
     def health(self, max_sensor_age=0.25, sensor_max_ages=None):
         thresholds = _resolve_sensor_max_ages(max_sensor_age, sensor_max_ages)

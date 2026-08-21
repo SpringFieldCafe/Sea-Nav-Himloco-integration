@@ -5,8 +5,10 @@ import numpy as np
 
 from tools.calibrate_lio_odom_se2 import (
     inverse_se2,
+    load_calibration_yaml,
     planar_motion_pairs,
     pose_matrix,
+    require_validation_motion,
     solve_se2,
     transform_from_se2,
 )
@@ -40,3 +42,18 @@ def test_odom_recorder_has_no_write_path():
     assert ".Write(" not in source
     assert "LowCmd" not in source
     assert "ServiceSwitch" not in source
+
+
+def test_validate_only_uses_fixed_yaml_solution(tmp_path):
+    yaml_path = tmp_path / "calibration.yaml"
+    yaml_path.write_text(
+        "base_to_lio_x_m: 0.12\n"
+        "base_to_lio_y_m: -0.07\n"
+        "base_to_lio_yaw_rad: 0.08\n",
+        encoding="utf-8",
+    )
+    np.testing.assert_allclose(load_calibration_yaml(yaml_path), [0.12, -0.07, 0.08])
+    require_validation_motion({
+        "translation_pairs": 1,
+        "left_right_signed_yaw_pairs": {"positive": 1, "negative": 1},
+    })

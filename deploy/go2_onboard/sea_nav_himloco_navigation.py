@@ -24,10 +24,17 @@ import torch
 
 from .command_bridge import ReadOnlyCommandBridge
 from .himloco_fixed_control import (
+    ARM_WAIT_TIMEOUT,
+    CONTROL_DT,
+    DEFAULT_ANGLES,
     FixedCommand,
     FixedHIMLocoController,
+    POSE_KD,
+    POSE_KP,
+    RuntimeState,
     SafetyError,
     configure_torch_runtime,
+    policy_profile_for_path,
 )
 from .ipc_schema import decode_packet
 from .model_loader import infer, load_navigation_policy
@@ -42,6 +49,7 @@ SEA_SHA256 = "d1242c74ff56189f20d7a12948d86078287651cd1f70215d9c308d04f4b561de"
 HIM_1460_SHA256 = "cab2489dda7732a7d6f51595aa6362384445c738537d0c1c91569054c7b9f5d1"
 NAV_LOWER = np.asarray([0.0, 0.0, -0.15], dtype=np.float32)
 NAV_UPPER = np.asarray([0.15, 0.0, 0.15], dtype=np.float32)
+NAV_VX_MAX = 0.15
 
 
 def sha256_file(path: str) -> str:
@@ -64,11 +72,28 @@ def validate_navigation_model(path: str, metadata_path: str, device: str = "cpu"
     return loaded
 
 
+def validate_navigation_himloco_policy(path: str, allow_override: bool = False) -> str:
+    """Require 1460 by default; allow only explicit policy identity override."""
+    resolved = str(Path(path).expanduser().resolve())
+    profile = policy_profile_for_path(resolved, allow_override=allow_override)
+    if profile != "himloco_1460" and not allow_override:
+        raise SafetyError("SEA-Nav navigation entry requires the approved HIMLoco 1460 model")
+    return sha256_file(resolved)
+
+
 class NavigationLimiter:
     """Explicit first-milestone limiter: forward arc only, no lateral vy."""
 
-    def __init__(self, filter_alpha: float = 0.15):
-        self.bridge = ReadOnlyCommandBridge(NAV_LOWER, NAV_UPPER, filter_alpha)
+    def __init__(self, filter_alpha: float = 0.15, vx_max: float = NAV_VX_MAX):
+        vx_max = float(vx_max)
+        if not np.isfinite(vx_max) or not 0.0 <= vx_max <= NAV_VX_MAX:
+            raise ValueError(f"navigation vx max must be in [0,{NAV_VX_MAX}]")
+        upper = NAV_UPPER.copy()
+        upper[0] = vx_max
+        self.vx_max = vx_max
+        self.bridge = ReadOnlyCommandBridge(NAV_LOWER, upper, filter_alpha)
+        self.lower = NAV_LOWER.copy()
+        self.upper = upper
 
     def reset(self):
         self.bridge.reset()
@@ -77,7 +102,7 @@ class NavigationLimiter:
         raw = np.asarray(raw, dtype=np.float32).reshape(-1)
         if raw.shape != (3,) or not np.isfinite(raw).all():
             raise FloatingPointError("SEA-Nav command must be a finite 3-vector")
-        limited = np.clip(raw, NAV_LOWER, NAV_UPPER)
+        limited = np.clip(raw, self.lower, self.upper)
         limited[1] = 0.0
         safe = self.bridge.filter(limited)
         safe[1] = 0.0
@@ -102,18 +127,27 @@ def _packet_is_fresh(packet, freshness):
     return True, ""
 
 
+def _navigation_arg(args, name):
+    return args.get(name) if isinstance(args, dict) else getattr(args, name)
+
+
 def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, reached):
+    source_metadata = {
+        "sensor_sequence": int(packet.get("sequence", -1)),
+        "sensor_timestamp_monotonic": float(packet.get("timestamp_monotonic", 0.0)),
+    }
     assume_clear_lidar = (args.get("assume_clear_lidar", False)
                           if isinstance(args, dict) else args.assume_clear_lidar)
     fresh, reason = _packet_is_fresh(packet, {
-        "lowstate": args.lowstate_max_age,
-        "odom": args.odom_max_age,
-        "lidar": args.lidar_max_age,
+        "lowstate": _navigation_arg(args, "lowstate_max_age"),
+        "odom": _navigation_arg(args, "odom_max_age"),
+        "lidar": _navigation_arg(args, "lidar_max_age"),
     })
     goal_body = np.asarray(packet.get("goal_body", [0.0, 0.0]), dtype=np.float32)
     distance = float(np.linalg.norm(goal_body))
-    if reached or (fresh and goal_is_reached(goal_body, args.goal_tolerance)):
+    if reached or (fresh and goal_is_reached(goal_body, _navigation_arg(args, "goal_tolerance"))):
         return {
+            **source_metadata,
             "command": [0.0, 0.0, 0.0],
             "raw_command": [0.0, 0.0, 0.0],
             "limited_command": [0.0, 0.0, 0.0],
@@ -131,6 +165,7 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
         nav_obs.reset()
         limiter.reset()
         return {
+            **source_metadata,
             "command": [0.0, 0.0, 0.0],
             "raw_command": [0.0, 0.0, 0.0],
             "limited_command": [0.0, 0.0, 0.0],
@@ -174,6 +209,7 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
     inference_ms = (time.perf_counter() - inference_start) * 1000.0
     raw_command, limited, safe = limiter.apply(raw)
     return {
+        **source_metadata,
         "command": safe.tolist(),
         "raw_command": raw_command.tolist(),
         "limited_command": limited.tolist(),
@@ -193,6 +229,8 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
 
 def _navigation_worker_main(config, sender, stop_event):
     """Run SEA inference away from the 50 Hz LowCmd process."""
+    sock = None
+    log = None
     try:
         configure_torch_runtime(1, 1)
         sea = load_navigation_policy(
@@ -203,7 +241,9 @@ def _navigation_worker_main(config, sender, stop_event):
         if sea.sha256 != SEA_SHA256:
             raise SafetyError("SEA-Nav worker hash mismatch")
         nav_obs = NavigationObservation(torch.device("cpu"))
-        limiter = NavigationLimiter(config["command_filter_alpha"])
+        limiter = NavigationLimiter(
+            config["command_filter_alpha"], config["navigation_vx_max"]
+        )
         previous_command = np.zeros(3, dtype=np.float32)
         reached = False
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -213,7 +253,6 @@ def _navigation_worker_main(config, sender, stop_event):
         buffer = b""
         latest_packet = None
         next_inference = 0.0
-        log = None
         if config["navigation_log"]:
             output = Path(config["navigation_log"])
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -239,6 +278,7 @@ def _navigation_worker_main(config, sender, stop_event):
                 latest_packet, sea, nav_obs, limiter, previous_command, config, reached
             )
             previous_command = np.asarray(result["command"], dtype=np.float32)
+            result["worker_send_timestamp_monotonic"] = time.monotonic()
             result["timestamp_monotonic"] = time.monotonic()
             sender.send(result)
             count += 1
@@ -265,7 +305,9 @@ def _navigation_worker_main(config, sender, stop_event):
             next_inference = now + 1.0 / float(config["navigation_hz"])
         if log:
             log.close()
+            log = None
         sock.close()
+        sock = None
     except Exception as exc:
         try:
             sender.send({
@@ -276,11 +318,19 @@ def _navigation_worker_main(config, sender, stop_event):
                 "limited_command": [0.0, 0.0, 0.0],
                 "goal_body": [0.0, 0.0],
                 "goal_distance": 0.0,
+                "reader_exit_reason": "worker_exception",
+                "socket_state": "worker_exception",
+                "worker_error": repr(exc),
                 "timestamp_monotonic": time.monotonic(),
                 "lowcmd_sent": False,
             })
         except (BrokenPipeError, EOFError, OSError):
             pass
+    finally:
+        if log:
+            log.close()
+        if sock is not None:
+            sock.close()
 
 
 class NavigationMailbox:
@@ -288,12 +338,18 @@ class NavigationMailbox:
 
     def __init__(self, max_age: float):
         self.max_age = float(max_age)
-        self.lock = threading.RLock()
+        self.condition = threading.Condition(threading.RLock())
+        self.lock = self.condition
         self.command = np.zeros(3, dtype=np.float32)
         self.received_at = 0.0
+        self.sensor_sequence = -1
+        self.sensor_timestamp_monotonic = 0.0
+        self.worker_send_timestamp_monotonic = 0.0
+        self.mailbox_update_monotonic = 0.0
+        self.last_handoff = {}
         self.last_result = {"runtime_state": "WAITING", "fault_reason": "navigation_not_ready"}
 
-    def update(self, result):
+    def update(self, result, received_at=None):
         command = np.asarray(result.get("command", [0.0, 0.0, 0.0]), dtype=np.float32).reshape(-1)
         if command.shape != (3,) or not np.isfinite(command).all():
             command = np.zeros(3, dtype=np.float32)
@@ -301,14 +357,77 @@ class NavigationMailbox:
         with self.lock:
             self.command = command
             self.received_at = time.monotonic()
+            self.sensor_sequence = int(result.get("sensor_sequence", -1))
+            self.sensor_timestamp_monotonic = float(
+                result.get("sensor_timestamp_monotonic", 0.0) or 0.0
+            )
+            self.worker_send_timestamp_monotonic = float(
+                result.get("worker_send_timestamp_monotonic", 0.0) or 0.0
+            )
+            self.mailbox_update_monotonic = (
+                time.monotonic() if received_at is None else float(received_at)
+            )
             self.last_result = dict(result)
+            self.condition.notify_all()
 
     def current(self):
         with self.lock:
-            age = time.monotonic() - self.received_at if self.received_at else float("inf")
-            if age > self.max_age:
+            delivery_age = time.monotonic() - self.received_at if self.received_at else float("inf")
+            sensor_age = (
+                time.monotonic() - self.sensor_timestamp_monotonic
+                if self.sensor_timestamp_monotonic
+                else float("inf")
+            )
+            age = max(delivery_age, sensor_age)
+            if delivery_age > self.max_age or sensor_age > self.max_age:
                 return FixedCommand(0.0, 0.0, 0.0), "navigation_command_stale", age
             return FixedCommand(*self.command.tolist()), "", age
+
+    def wait_for_fresh_command(self, timeout: float, on_wait=None):
+        """Return only a result sourced after this call and within max_age."""
+        deadline = time.monotonic() + float(timeout)
+        with self.lock:
+            baseline_sequence = self.sensor_sequence
+            self.command.fill(0.0)
+        while True:
+            now = time.monotonic()
+            with self.lock:
+                source_sequence = self.sensor_sequence
+                source_timestamp = self.sensor_timestamp_monotonic
+                received_at = self.received_at
+                command = self.command.copy()
+                state = self.last_result.get("runtime_state")
+            source_age = now - source_timestamp if source_timestamp else float("inf")
+            received_age = now - received_at if received_at else float("inf")
+            if (
+                source_sequence > baseline_sequence
+                and source_age <= self.max_age
+                and received_age <= self.max_age
+                and state in ("NAVIGATION", "GOAL_REACHED")
+            ):
+                self.last_handoff = {
+                    "boundary_sequence": baseline_sequence,
+                    "sensor_sequence": source_sequence,
+                    "source_age_ms": source_age * 1000.0,
+                    "delivery_age_ms": received_age * 1000.0,
+                    "worker_send_timestamp_monotonic": self.worker_send_timestamp_monotonic,
+                    "mailbox_update_monotonic": self.mailbox_update_monotonic,
+                }
+                return FixedCommand(*command.tolist())
+            if now >= deadline:
+                raise SafetyError(
+                    "no fresh navigation command after ACTIVE handoff "
+                    f"boundary_sequence={baseline_sequence} "
+                    f"current_sequence={source_sequence} "
+                    f"source_age_s={source_age:.3f} "
+                    f"delivery_age_s={received_age:.3f}"
+                )
+            if on_wait is not None:
+                on_wait()
+            with self.condition:
+                remaining = deadline - time.monotonic()
+                if remaining > 0.0:
+                    self.condition.wait(timeout=min(CONTROL_DT, remaining))
 
 
 class NavigationProcess:
@@ -320,6 +439,8 @@ class NavigationProcess:
         self.receiver, self.sender = self.context.Pipe(duplex=False)
         self.process = None
         self.receiver_thread = None
+        self.receiver_error = None
+        self.reader_exit_reason = None
 
     def start(self):
         self.process = self.context.Process(
@@ -335,11 +456,35 @@ class NavigationProcess:
         while not self.stop_event.is_set():
             try:
                 if self.receiver.poll(0.1):
-                    self.mailbox.update(self.receiver.recv())
+                    self.mailbox.update(self.receiver.recv(), received_at=time.monotonic())
                 elif self.process is not None and not self.process.is_alive():
+                    if self.stop_event.is_set():
+                        self.reader_exit_reason = "normal_shutdown"
+                    else:
+                        self.reader_exit_reason = "worker_exit"
+                        self.receiver_error = "navigation worker exited unexpectedly"
                     return
-            except (EOFError, OSError):
+            except (EOFError, OSError) as exc:
+                self.receiver_error = str(exc)
+                self.reader_exit_reason = "reader_exception"
                 return
+
+    def status(self):
+        return {
+            "worker_alive": bool(self.process is not None and self.process.is_alive()),
+            "reader_thread_alive": bool(
+                self.receiver_thread is not None and self.receiver_thread.is_alive()
+            ),
+            "reader_error": self.receiver_error,
+            "reader_exit_reason": self.reader_exit_reason,
+            "last_sequence": self.mailbox.sensor_sequence,
+            "last_packet_age_s": (
+                time.monotonic() - self.mailbox.sensor_timestamp_monotonic
+                if self.mailbox.sensor_timestamp_monotonic
+                else float("inf")
+            ),
+            "socket_state": self.mailbox.last_result.get("socket_state", "unknown"),
+        }
 
     def stop(self):
         self.stop_event.set()
@@ -373,8 +518,53 @@ class SeaNavHimLocoController(FixedHIMLocoController):
             self._last_navigation_fault = None
         return command
 
-    def _run_policy_once(self, _command, snapshot):
-        return super()._run_policy_once(self._current_navigation_command(), snapshot)
+    def _hold_default_pose_while_waiting_for_navigation(self):
+        snapshot = self._snapshot()
+        self._check_runtime_safety(snapshot)
+        self._send_timed_pose_command(DEFAULT_ANGLES, POSE_KP, POSE_KD)
+
+    def _initialize_policy_history(self, snapshot, _command):
+        command = self.navigation.mailbox.wait_for_fresh_command(
+            ARM_WAIT_TIMEOUT,
+            on_wait=self._hold_default_pose_while_waiting_for_navigation,
+        )
+        with self.navigation.mailbox.lock:
+            handoff = dict(self.navigation.mailbox.last_handoff)
+        print(
+            "[navigation] ACTIVE_HANDOFF_FRESH "
+            + json.dumps(handoff, separators=(",", ":"))
+        )
+        return super()._initialize_policy_history(snapshot, command)
+
+    def _handle_policy_arm_failure(self, error):
+        if "navigation" not in str(error).lower():
+            return False
+        self.state = RuntimeState.DEFAULT_POSE_HOLD
+        status = self.navigation.status()
+        print(f"[safety] NAVIGATION_ARM_FAILED: {error}")
+        print(
+            "[navigation] "
+            "worker_alive=%s reader_thread_alive=%s reader_error=%s "
+            "reader_exit_reason=%s last_sequence=%s last_packet_age_s=%.3f socket_state=%s"
+            % (
+                status["worker_alive"],
+                status["reader_thread_alive"],
+                status["reader_error"],
+                status["reader_exit_reason"],
+                status["last_sequence"],
+                status["last_packet_age_s"],
+                status["socket_state"],
+            )
+        )
+        print("[safety] DEFAULT_POSE_HOLD: release A; press A to retry; Select=STOP; B=ESTOP; Ctrl+C=STOP")
+        return True
+
+    def _run_policy_once(self, _command, snapshot, observation=None):
+        return super()._run_policy_once(
+            self._current_navigation_command(),
+            snapshot,
+            observation=observation,
+        )
 
     def _print_diagnostics(self, now):
         super()._print_diagnostics(now)
@@ -414,10 +604,21 @@ def build_parser():
     parser.add_argument("--navigation-hz", type=float, default=10.0)
     parser.add_argument("--navigation-command-max-age", type=float, default=0.25)
     parser.add_argument("--navigation-filter-alpha", type=float, default=0.15)
+    parser.add_argument(
+        "--navigation-vx-max",
+        type=float,
+        default=NAV_VX_MAX,
+        help="navigation forward-vx safety upper bound in m/s; maximum 0.15",
+    )
     parser.add_argument("--navigation-connect-timeout", type=float, default=10.0)
     parser.add_argument("--navigation-summary-interval", type=float, default=1.0)
     parser.add_argument("--assume-clear-lidar", action="store_true",
                         help="NO OBSTACLE AVOIDANCE: use 5m LiDAR rays")
+    parser.add_argument(
+        "--allow-policy-override",
+        action="store_true",
+        help="explicit test mode: allow non-1460 HIMLoco policies after the 270->12 contract gate",
+    )
     parser.add_argument("--navigation-log", default=DEFAULT_NAVIGATION_LOG)
     parser.add_argument("--goal-x", type=float, required=True)
     parser.add_argument("--goal-y", type=float, required=True)
@@ -433,6 +634,8 @@ def main(argv=None):
         raise SystemExit("--navigation-hz must be in (0,20]")
     if args.navigation_command_max_age <= 0.0 or args.goal_tolerance <= 0.0:
         raise SystemExit("navigation freshness and goal tolerance must be positive")
+    if not np.isfinite(args.navigation_vx_max) or not 0.0 <= args.navigation_vx_max <= NAV_VX_MAX:
+        raise SystemExit(f"--navigation-vx-max must be in [0,{NAV_VX_MAX}]")
     # The fixed controller parser is reused for its transport/safety options.
     # Navigation owns the command source; non-zero fixed commands are rejected
     # instead of silently becoming a second command path.
@@ -441,11 +644,17 @@ def main(argv=None):
     configure_torch_runtime(args.torch_threads, args.torch_interop_threads)
     sea = validate_navigation_model(args.navigation_policy, args.navigation_metadata)
     print(f"[model] SEA path={sea.path} sha256={sea.sha256} input=550 output=3")
-    if sha256_file(str(Path(args.policy).expanduser().resolve())) != HIM_1460_SHA256:
-        raise SystemExit("SEA-Nav navigation entry requires the approved HIMLoco 1460 model")
+    himloco_sha = validate_navigation_himloco_policy(
+        args.policy, allow_override=args.allow_policy_override
+    )
+    if args.allow_policy_override:
+        print(f"[safety] HIMLOCO_POLICY_OVERRIDE=ENABLED sha256={himloco_sha}")
     print(f"[navigation] GOAL_WORLD=[{args.goal_x:.6f},{args.goal_y:.6f}] frame=odom")
     print(f"[navigation] GOAL_TOLERANCE={args.goal_tolerance:.3f}m")
-    print("[safety] NAVIGATION_SAFETY_PROFILE vx=[0,0.15] vy=0 wz=[-0.15,+0.15]")
+    print(
+        "[safety] NAVIGATION_SAFETY_PROFILE "
+        f"vx=[0,{args.navigation_vx_max:.6f}] vy=0 wz=[-0.15,+0.15]"
+    )
 
     mailbox = NavigationMailbox(args.navigation_command_max_age)
     config = {
@@ -455,6 +664,7 @@ def main(argv=None):
         "navigation_hz": args.navigation_hz,
         "navigation_command_max_age": args.navigation_command_max_age,
         "command_filter_alpha": args.navigation_filter_alpha,
+        "navigation_vx_max": args.navigation_vx_max,
         "connect_timeout": args.navigation_connect_timeout,
         "summary_interval": args.navigation_summary_interval,
         "navigation_log": args.navigation_log,
@@ -468,7 +678,7 @@ def main(argv=None):
     controller = SeaNavHimLocoController(args, navigation)
     try:
         controller.validate_model()
-        if controller.policy_profile != "himloco_1460":
+        if controller.policy_profile != "himloco_1460" and not args.allow_policy_override:
             raise SafetyError("SEA-Nav navigation requires policy_profile=himloco_1460")
         controller.args.command = FixedCommand(0.0, 0.0, 0.0)
         controller.connect()

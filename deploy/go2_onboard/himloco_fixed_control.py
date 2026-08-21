@@ -185,6 +185,16 @@ def approved_policy_profile_for_path(path: str) -> str:
     return profile
 
 
+def policy_profile_for_path(path: str, allow_override: bool = False) -> str:
+    """Resolve an approved profile, or an explicit contract-only override."""
+    try:
+        return approved_policy_profile_for_path(path)
+    except SafetyError:
+        if not allow_override:
+            raise
+        return "policy_override"
+
+
 def validate_fixed_command(
     vx: float,
     vy: float,
@@ -286,6 +296,8 @@ def history_repeat_on_first_for_profile(policy_profile: str) -> bool:
         # Historical deploy_real_go2.py started with current frame + five zeros.
         return False
     if policy_profile == "himloco_1460":
+        return True
+    if policy_profile == "policy_override":
         return True
     raise SafetyError(f"unknown approved policy profile: {policy_profile}")
 
@@ -452,12 +464,10 @@ class FixedHIMLocoController:
         if not path.is_file():
             raise SafetyError(f"HIMLoco model does not exist: {path}")
         actual = sha256_file(str(path))
-        profile = APPROVED_POLICY_PROFILES.get(actual)
-        if profile is None:
-            approved = ", ".join(sorted(APPROVED_POLICIES.values()))
-            raise SafetyError(
-                f"model SHA256 is not approved: got {actual}; approved hashes: {approved}"
-            )
+        allow_override = bool(getattr(self.args, "allow_policy_override", False))
+        profile = policy_profile_for_path(str(path), allow_override=allow_override)
+        if profile == "policy_override":
+            print("[safety] HIMLOCO_POLICY_OVERRIDE=ENABLED contract=270->12")
         self.policy = torch.jit.load(str(path), map_location="cpu").eval()
         with torch.inference_mode():
             probe = torch.zeros((1, EXPECTED_INPUT_DIM), dtype=torch.float32)
@@ -884,6 +894,9 @@ class FixedHIMLocoController:
         )
         return observation
 
+    def _handle_policy_arm_failure(self, _error):
+        return False
+
     def _print_diagnostics(self, now):
         if now - self._last_summary < 1.0:
             return
@@ -956,9 +969,18 @@ class FixedHIMLocoController:
         pose_snapshot = self._wait_for_pose_arm()
         _, _, initial_q, _ = self._prepare_sensor(pose_snapshot.message)
         self._move_to_default_pos(initial_q)
-        policy_arm_snapshot = self._wait_for_policy_arm()
-        policy_snapshot = self._wait_for_fresh_policy_snapshot(policy_arm_snapshot)
-        first_observation = self._initialize_policy_history(policy_snapshot, self.args.command)
+        while True:
+            policy_arm_snapshot = self._wait_for_policy_arm()
+            try:
+                policy_snapshot = self._wait_for_fresh_policy_snapshot(policy_arm_snapshot)
+                first_observation = self._initialize_policy_history(
+                    policy_snapshot, self.args.command
+                )
+            except SafetyError as exc:
+                if not self._handle_policy_arm_failure(exc):
+                    raise
+                continue
+            break
         self.state = RuntimeState.ACTIVE
         self._reset_active_metrics()
         print(f"[safety] ACTIVE command={self.args.command.as_array().tolist()}")
