@@ -1,4 +1,5 @@
 import ast
+from collections import deque
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     KP,
     POLICY_TO_MOTOR,
     LowStateWatchdog,
+    LowStateSnapshot,
     RuntimeState,
     SafetyError,
     build_observation,
@@ -35,6 +37,7 @@ from deploy.go2_onboard.himloco_fixed_control import (
     projected_gravity_from_wxyz,
     sport_mode_allows_low_level,
     low_level_gate_allows,
+    lowstate_snapshot_is_newer,
     sha256_file,
     validate_fixed_command,
     advance_deadline,
@@ -194,6 +197,92 @@ def test_legacy_profile_matches_old_deploy_observation_and_action_fixture():
         old_action = policy(torch.from_numpy(old_observation))
         current_action = policy(current_observation)
     torch.testing.assert_close(current_action, old_action)
+
+
+def _handoff_controller(profile="legacy_policy_1", action=None):
+    controller = object.__new__(FixedHIMLocoController)
+    controller.policy_profile = profile
+    controller.him_obs = HIMLocoObservation(torch.device("cpu"))
+    controller.low_cmd = SimpleNamespace(
+        motor_cmd=[SimpleNamespace(q=0.0, dq=0.0, kp=0.0, kd=0.0, tau=0.0) for _ in range(12)]
+    )
+    controller.policy = action or (lambda observation: torch.zeros((1, 12)))
+    controller.last_forward_ms = 0.0
+    controller.last_action_ms = 0.0
+    controller.last_prepare_ms = 0.0
+    controller.last_observation_ms = 0.0
+    controller.forward_durations = deque()
+    controller.prepare_durations = deque()
+    controller.observation_durations = deque()
+    controller.action_durations = deque()
+    controller.previous_action = np.zeros(12, dtype=np.float32)
+    return controller
+
+
+def _handoff_snapshot(received_at):
+    message = SimpleNamespace(
+        motor_state=[SimpleNamespace(q=float(q), dq=0.0) for q in DEFAULT_ANGLES],
+        imu_state=SimpleNamespace(gyroscope=[0.0, 0.0, 0.0], quaternion=[1.0, 0.0, 0.0, 0.0]),
+    )
+    return LowStateSnapshot(message=message, received_at=received_at, remote_keys=0)
+
+
+def test_first_active_observation_is_forwarded_without_second_history_push():
+    seen = []
+
+    def policy(observation):
+        seen.append(observation.detach().clone())
+        return torch.zeros((1, 12))
+
+    controller = _handoff_controller(action=policy)
+    snapshot = _handoff_snapshot(2.0)
+    first = controller._initialize_policy_history(snapshot, SimpleNamespace(as_array=lambda: np.zeros(3, dtype=np.float32)))
+    history_before_forward = controller.him_obs.history.buffer.clone()
+
+    controller._run_policy_once(
+        SimpleNamespace(as_array=lambda: np.zeros(3, dtype=np.float32)),
+        snapshot,
+        observation=first,
+    )
+
+    torch.testing.assert_close(seen[0], first)
+    torch.testing.assert_close(controller.him_obs.history.buffer, history_before_forward)
+
+
+def test_second_active_cycle_performs_one_history_shift():
+    seen = []
+
+    def policy(observation):
+        seen.append(observation.detach().clone())
+        return torch.ones((1, 12))
+
+    controller = _handoff_controller(action=policy)
+    command = SimpleNamespace(as_array=lambda: np.zeros(3, dtype=np.float32))
+    snapshot = _handoff_snapshot(2.0)
+    first = controller._initialize_policy_history(snapshot, command)
+    controller._run_policy_once(command, snapshot, observation=first)
+    first_frame = first.reshape(1, 6, 45)[:, 0].clone()
+
+    controller._run_policy_once(command, _handoff_snapshot(3.0))
+    frames = controller.him_obs.history.buffer
+    torch.testing.assert_close(frames[:, 1], first_frame)
+    torch.testing.assert_close(frames[:, 0, 33:45], torch.ones((1, 12)))
+    assert len(seen) == 2
+
+
+def test_a_snapshot_requires_newer_lowstate_timestamp():
+    baseline = _handoff_snapshot(10.0)
+    same = _handoff_snapshot(10.0)
+    newer = _handoff_snapshot(10.001)
+    assert not lowstate_snapshot_is_newer(same, baseline)
+    assert lowstate_snapshot_is_newer(newer, baseline)
+
+    controller = object.__new__(FixedHIMLocoController)
+    snapshots = iter((same, newer))
+    controller._snapshot = lambda: next(snapshots)
+    controller._check_runtime_safety = lambda snapshot: None
+    result = controller._wait_for_fresh_policy_snapshot(baseline)
+    assert result.received_at > baseline.received_at
 
 
 def test_joint_mapping_and_target_contract():

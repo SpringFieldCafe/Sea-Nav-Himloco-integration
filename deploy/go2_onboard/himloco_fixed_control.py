@@ -148,6 +148,11 @@ class LowStateSnapshot:
     remote_keys: int = 0
 
 
+def lowstate_snapshot_is_newer(snapshot: LowStateSnapshot, baseline: LowStateSnapshot) -> bool:
+    """Use the callback receive timestamp as the LowState update sequence."""
+    return float(snapshot.received_at) > float(baseline.received_at)
+
+
 def sha256_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -638,15 +643,18 @@ class FixedHIMLocoController:
         gravity = projected_gravity_from_wxyz(quat)
         return gyro, gravity, q_policy, dq_policy
 
-    def _run_policy_once(self, command, snapshot):
-        prepare_start = time.monotonic()
-        gyro, gravity, q_policy, dq_policy = self._prepare_sensor(snapshot.message)
-        self.last_prepare_ms = (time.monotonic() - prepare_start) * 1000.0
-        self.prepare_durations.append(time.monotonic() - prepare_start)
-        observation_start = time.monotonic()
-        observation = build_observation(self.him_obs, command.as_array(), gyro, gravity, q_policy, dq_policy)
-        self.last_observation_ms = (time.monotonic() - observation_start) * 1000.0
-        self.observation_durations.append(time.monotonic() - observation_start)
+    def _run_policy_once(self, command, snapshot, observation=None):
+        if observation is None:
+            prepare_start = time.monotonic()
+            gyro, gravity, q_policy, dq_policy = self._prepare_sensor(snapshot.message)
+            self.last_prepare_ms = (time.monotonic() - prepare_start) * 1000.0
+            self.prepare_durations.append(time.monotonic() - prepare_start)
+            observation_start = time.monotonic()
+            observation = build_observation(
+                self.him_obs, command.as_array(), gyro, gravity, q_policy, dq_policy
+            )
+            self.last_observation_ms = (time.monotonic() - observation_start) * 1000.0
+            self.observation_durations.append(time.monotonic() - observation_start)
         forward_start = time.monotonic()
         with torch.inference_mode():
             action = self.policy(observation).reshape(-1).detach().cpu().numpy()
@@ -843,10 +851,24 @@ class FixedHIMLocoController:
             )
             self._cycle_event("loop_end", loop_start_monotonic=loop_start, loop_end_monotonic=sleep_end)
 
+    def _wait_for_fresh_policy_snapshot(self, baseline):
+        """Wait until the A-edge snapshot has been replaced by a new callback sample."""
+        deadline = time.monotonic() + ARM_WAIT_TIMEOUT
+        while True:
+            snapshot = self._snapshot()
+            if lowstate_snapshot_is_newer(snapshot, baseline):
+                self._check_runtime_safety(snapshot)
+                return snapshot
+            if time.monotonic() >= deadline:
+                raise SafetyError(
+                    "no newer LowState received after A before policy activation"
+                )
+            time.sleep(0.001)
+
     def _initialize_policy_history(self, snapshot, command):
         gyro, gravity, q_policy, dq_policy = self._prepare_sensor(snapshot.message)
         repeat_history = history_repeat_on_first_for_profile(self.policy_profile)
-        build_observation(
+        observation = build_observation(
             self.him_obs,
             command.as_array(),
             gyro,
@@ -860,6 +882,7 @@ class FixedHIMLocoController:
             "[safety] HISTORY_INIT_SOURCE=latest_default_pose_lowstate "
             f"HISTORY_MODE={history_mode} PREVIOUS_ACTION_INIT=zeros"
         )
+        return observation
 
     def _print_diagnostics(self, now):
         if now - self._last_summary < 1.0:
@@ -933,8 +956,9 @@ class FixedHIMLocoController:
         pose_snapshot = self._wait_for_pose_arm()
         _, _, initial_q, _ = self._prepare_sensor(pose_snapshot.message)
         self._move_to_default_pos(initial_q)
-        policy_snapshot = self._wait_for_policy_arm()
-        self._initialize_policy_history(policy_snapshot, self.args.command)
+        policy_arm_snapshot = self._wait_for_policy_arm()
+        policy_snapshot = self._wait_for_fresh_policy_snapshot(policy_arm_snapshot)
+        first_observation = self._initialize_policy_history(policy_snapshot, self.args.command)
         self.state = RuntimeState.ACTIVE
         self._reset_active_metrics()
         print(f"[safety] ACTIVE command={self.args.command.as_array().tolist()}")
@@ -944,6 +968,7 @@ class FixedHIMLocoController:
             print(f"[safety] ZERO_HOLD_TIMER_START duration={self.args.hold_duration:.1f}s")
         next_tick = time.monotonic()
         previous_control_start = None
+        first_active_cycle = True
         while self.state == RuntimeState.ACTIVE:
             if self.args.hold_duration > 0.0 and time.monotonic() - hold_started >= self.args.hold_duration:
                 print("[safety] ZERO_HOLD_TIMER_COMPLETE")
@@ -952,10 +977,15 @@ class FixedHIMLocoController:
             if previous_control_start is not None:
                 self.control_periods.append(loop_start - previous_control_start)
             previous_control_start = loop_start
-            snapshot = self._snapshot()
+            snapshot = policy_snapshot if first_active_cycle else self._snapshot()
             self._check_runtime_safety(snapshot)
             policy_start = time.monotonic()
-            self._run_policy_once(self.args.command, snapshot)
+            self._run_policy_once(
+                self.args.command,
+                snapshot,
+                observation=first_observation if first_active_cycle else None,
+            )
+            first_active_cycle = False
             self.last_policy_ms = (time.monotonic() - policy_start) * 1000.0
             self.policy_durations.append(time.monotonic() - policy_start)
             publish_start = time.monotonic()
