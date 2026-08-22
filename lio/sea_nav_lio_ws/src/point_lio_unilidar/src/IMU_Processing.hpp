@@ -38,6 +38,7 @@ class ImuProcess
   void Reset(double start_timestamp, const sensor_msgs::msg::Imu::ConstSharedPtr &lastimu);
   void Process(const MeasureGroup &meas, PointCloudXYZI::Ptr pcl_un_);
   void Set_init(Eigen::Vector3d &tmp_gravity, Eigen::Matrix3d &rot);
+  const V3D &mean_gyr_value() const { return mean_gyr; }
 
   ofstream fout_imu;
  

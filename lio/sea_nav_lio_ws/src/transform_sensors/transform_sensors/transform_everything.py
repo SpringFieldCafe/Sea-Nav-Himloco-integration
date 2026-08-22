@@ -15,10 +15,13 @@ import numpy as np
 import yaml
 
 import os
+import math
 
 class Repuber(Node):
     def __init__(self):
         super().__init__('sensor_transformer')
+        self.declare_parameter('imu_ang_z2x_proj', float('nan'))
+        self.declare_parameter('imu_ang_z2y_proj', float('nan'))
         self.imu_sub = self.create_subscription(Imu, '/utlidar/imu', self.imu_callback, 50)
         self.cloud_sub = self.create_subscription(PointCloud2, '/utlidar/cloud', self.cloud_callback, 50)
         
@@ -33,8 +36,9 @@ class Repuber(Node):
         
         self.cam_offset = 0.046825
 
-        # Load calibration data
-        calib_data = calib_data = {
+        # Load calibration data. Explicit ROS parameters override only the two
+        # projection terms; all other calibration values keep their old path.
+        default_calib_data = {
                 'acc_bias_x': 0.0,
                 'acc_bias_y': 0.0,
                 'acc_bias_z': 0.0,
@@ -44,11 +48,13 @@ class Repuber(Node):
                 'ang_z2x_proj': 0.15,
                 'ang_z2y_proj': -0.28
             }
+        calib_data = default_calib_data
+        calib_source = 'legacy_fallback_default'
+        calib_file_path = os.path.join(os.path.expanduser('~'), 'Desktop/imu_calib_data.yaml')
         try:
-            home_path = os.path.expanduser('~')
-            calib_file_path = os.path.join(home_path, 'Desktop/imu_calib_data.yaml')
             calib_file = open(calib_file_path, 'r')
             calib_data = yaml.load(calib_file, Loader=yaml.FullLoader)
+            calib_source = 'calibration_yaml'
             print("imu_calib.yaml loaded")
             calib_file.close()
         except:
@@ -60,8 +66,23 @@ class Repuber(Node):
         self.ang_bias_x = calib_data['ang_bias_x']
         self.ang_bias_y = calib_data['ang_bias_y']
         self.ang_bias_z = calib_data['ang_bias_z']
-        self.ang_z2x_proj = calib_data['ang_z2x_proj']
-        self.ang_z2y_proj = calib_data['ang_z2y_proj']
+        override_x = float(self.get_parameter('imu_ang_z2x_proj').value)
+        override_y = float(self.get_parameter('imu_ang_z2y_proj').value)
+        override_x_set = math.isfinite(override_x)
+        override_y_set = math.isfinite(override_y)
+        self.ang_z2x_proj = override_x if override_x_set else calib_data['ang_z2x_proj']
+        self.ang_z2y_proj = override_y if override_y_set else calib_data['ang_z2y_proj']
+        if override_x_set or override_y_set:
+            if calib_source == 'calibration_yaml':
+                calib_source = 'explicit_override_over_calibration_yaml'
+            elif override_x_set and override_y_set:
+                calib_source = 'explicit_override_over_legacy_defaults'
+            else:
+                calib_source = 'mixed_explicit_override_and_legacy_or_calibration'
+
+        print(f"IMU_ANG_Z2X_PROJ={self.ang_z2x_proj:.9f}")
+        print(f"IMU_ANG_Z2Y_PROJ={self.ang_z2y_proj:.9f}")
+        print(f"IMU_CALIB_SOURCE={calib_source}")
                 
         self.body2cloud_trans = TransformStamped()
         self.body2cloud_trans.header.stamp = self.get_clock().now().to_msg()

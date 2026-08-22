@@ -3,8 +3,9 @@
         use_sim_time: false
         use_imu_as_input: false
         runtime_pos_log_enable: false
-        filter_size_surf_min: 0.2
-        filter_size_map_min: 0.2
+        filter_size_surf: 0.1
+        filter_size_map: 0.5
+        point_filter_num: 1
         common:
             lid_topic: "/sea_nav/lio/transformed_cloud"
             imu_topic: "/sea_nav/lio/transformed_raw_imu"

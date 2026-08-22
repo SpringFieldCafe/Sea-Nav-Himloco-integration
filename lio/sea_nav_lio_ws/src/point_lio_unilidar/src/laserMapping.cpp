@@ -5,9 +5,13 @@
 #include <fstream>
 #include <csignal>
 #include <unistd.h>
+#include <iostream>
+#include <algorithm>
+#include <limits>
 #include <Python.h>
 #include <so3_math.h>
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
@@ -99,6 +103,382 @@ nav_msgs::msg::Odometry odomAftMapped;
 geometry_msgs::msg::PoseStamped msg_body_pose;
 
 std::unique_ptr<tf2_ros::TransformBroadcaster> tf_br;
+
+double lio_diag_last_report_time = 0.0;
+bool lio_diag_scan_bbox_valid = false;
+Eigen::Vector3d lio_diag_scan_bbox_min;
+Eigen::Vector3d lio_diag_scan_bbox_max;
+bool lio_diag_state_init_valid = false;
+Eigen::Vector3d lio_diag_state_pos_init;
+
+struct LioDiagStateSnapshot
+{
+    V3D pos = V3D::Zero();
+    V3D vel = V3D::Zero();
+    V3D euler_deg = V3D::Zero();
+    V3D gravity = V3D::Zero();
+    V3D acc_bias = V3D::Zero();
+    V3D gyro_bias = V3D::Zero();
+};
+
+template<typename State>
+LioDiagStateSnapshot snapshot_lio_state(const State &state)
+{
+    LioDiagStateSnapshot snapshot;
+    snapshot.pos = state.pos;
+    snapshot.vel = state.vel;
+    snapshot.euler_deg = SO3ToEuler(state.rot);
+    snapshot.gravity = state.gravity;
+    snapshot.acc_bias = state.ba;
+    snapshot.gyro_bias = state.bg;
+    return snapshot;
+}
+
+std::uint64_t lio_diag_trace_count = 0;
+V3D lio_diag_cum_prop_vel = V3D::Zero();
+V3D lio_diag_cum_ekf_vel = V3D::Zero();
+V3D lio_diag_cum_prop_rot = V3D::Zero();
+V3D lio_diag_cum_ekf_rot = V3D::Zero();
+V3D lio_diag_cum_ekf_acc_bias = V3D::Zero();
+V3D lio_diag_cum_ekf_gyro_bias = V3D::Zero();
+double lio_diag_cum_prop_vel_norm = 0.0;
+double lio_diag_cum_ekf_vel_norm = 0.0;
+double lio_diag_cum_prop_rot_norm = 0.0;
+double lio_diag_cum_ekf_rot_norm = 0.0;
+
+void record_ekf_trace(const LioDiagStateSnapshot &pre,
+                      const LioDiagStateSnapshot &propagated,
+                      const LioDiagStateSnapshot &post,
+                      bool update_ok)
+{
+    if (lio_diag_trace_count >= 200)
+        return;
+
+    const V3D delta_prop_pos = propagated.pos - pre.pos;
+    const V3D delta_prop_vel = propagated.vel - pre.vel;
+    const V3D delta_prop_rot = propagated.euler_deg - pre.euler_deg;
+    const V3D delta_ekf_pos = post.pos - propagated.pos;
+    const V3D delta_ekf_vel = post.vel - propagated.vel;
+    const V3D delta_ekf_rot = post.euler_deg - propagated.euler_deg;
+    const V3D delta_ekf_acc_bias = post.acc_bias - propagated.acc_bias;
+    const V3D delta_ekf_gyro_bias = post.gyro_bias - propagated.gyro_bias;
+
+    lio_diag_cum_prop_vel += delta_prop_vel;
+    lio_diag_cum_ekf_vel += delta_ekf_vel;
+    lio_diag_cum_prop_rot += delta_prop_rot;
+    lio_diag_cum_ekf_rot += delta_ekf_rot;
+    lio_diag_cum_ekf_acc_bias += delta_ekf_acc_bias;
+    lio_diag_cum_ekf_gyro_bias += delta_ekf_gyro_bias;
+    lio_diag_cum_prop_vel_norm += delta_prop_vel.norm();
+    lio_diag_cum_ekf_vel_norm += delta_ekf_vel.norm();
+    lio_diag_cum_prop_rot_norm += delta_prop_rot.norm();
+    lio_diag_cum_ekf_rot_norm += delta_ekf_rot.norm();
+
+    std::cout << "[LIO-DIAG] EKF_TRACE"
+              << " index=" << lio_diag_trace_count
+              << " update=" << (update_ok ? "SUCCESS" : "FAIL")
+              << " PRE_POS=" << pre.pos.transpose()
+              << " PRE_VEL=" << pre.vel.transpose()
+              << " PRE_ROT_DEG=" << pre.euler_deg.transpose()
+              << " PRE_ACC_BIAS=" << pre.acc_bias.transpose()
+              << " PRE_GYRO_BIAS=" << pre.gyro_bias.transpose()
+              << " PROP_POS=" << propagated.pos.transpose()
+              << " PROP_VEL=" << propagated.vel.transpose()
+              << " PROP_ROT_DEG=" << propagated.euler_deg.transpose()
+              << " PROP_ACC_BIAS=" << propagated.acc_bias.transpose()
+              << " PROP_GYRO_BIAS=" << propagated.gyro_bias.transpose()
+              << " POST_POS=" << post.pos.transpose()
+              << " POST_VEL=" << post.vel.transpose()
+              << " POST_ROT_DEG=" << post.euler_deg.transpose()
+              << " POST_ACC_BIAS=" << post.acc_bias.transpose()
+              << " POST_GYRO_BIAS=" << post.gyro_bias.transpose()
+              << " DELTA_PROP_POS=" << delta_prop_pos.transpose()
+              << " DELTA_PROP_VEL=" << delta_prop_vel.transpose()
+              << " DELTA_PROP_ROT_DEG=" << delta_prop_rot.transpose()
+              << " DELTA_EKF_POS=" << delta_ekf_pos.transpose()
+              << " DELTA_EKF_VEL=" << delta_ekf_vel.transpose()
+              << " DELTA_EKF_ROT_DEG=" << delta_ekf_rot.transpose()
+              << " DELTA_EKF_ACC_BIAS=" << delta_ekf_acc_bias.transpose()
+              << " DELTA_EKF_GYRO_BIAS=" << delta_ekf_gyro_bias.transpose()
+              << std::endl;
+    lio_diag_trace_count++;
+}
+
+void update_lio_diag_scan_bbox()
+{
+    if (feats_down_world == nullptr || feats_down_world->empty())
+        return;
+
+    lio_diag_scan_bbox_min << std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity();
+    lio_diag_scan_bbox_max << -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity();
+    for (const auto &point : feats_down_world->points)
+    {
+        lio_diag_scan_bbox_min.x() = std::min(lio_diag_scan_bbox_min.x(), static_cast<double>(point.x));
+        lio_diag_scan_bbox_min.y() = std::min(lio_diag_scan_bbox_min.y(), static_cast<double>(point.y));
+        lio_diag_scan_bbox_min.z() = std::min(lio_diag_scan_bbox_min.z(), static_cast<double>(point.z));
+        lio_diag_scan_bbox_max.x() = std::max(lio_diag_scan_bbox_max.x(), static_cast<double>(point.x));
+        lio_diag_scan_bbox_max.y() = std::max(lio_diag_scan_bbox_max.y(), static_cast<double>(point.y));
+        lio_diag_scan_bbox_max.z() = std::max(lio_diag_scan_bbox_max.z(), static_cast<double>(point.z));
+    }
+    lio_diag_scan_bbox_valid = true;
+}
+
+void get_lio_diag_state(Eigen::Vector3d &pos, Eigen::Vector3d &vel,
+                        Eigen::Vector3d &gravity, Eigen::Vector3d &acc_bias,
+                        Eigen::Vector3d &gyro_bias, V3D &euler_deg)
+{
+    if (use_imu_as_input)
+    {
+        pos = kf_input.x_.pos;
+        vel = kf_input.x_.vel;
+        gravity = kf_input.x_.gravity;
+        acc_bias = kf_input.x_.ba;
+        gyro_bias = kf_input.x_.bg;
+        euler_deg = SO3ToEuler(kf_input.x_.rot);
+    }
+    else
+    {
+        pos = kf_output.x_.pos;
+        vel = kf_output.x_.vel;
+        gravity = kf_output.x_.gravity;
+        acc_bias = kf_output.x_.ba;
+        gyro_bias = kf_output.x_.bg;
+        euler_deg = SO3ToEuler(kf_output.x_.rot);
+    }
+}
+
+void report_first_twenty_group(double dt, bool update_ok,
+                               std::uint64_t nearest_before,
+                               std::uint64_t plane_before,
+                               std::uint64_t residual_before)
+{
+    if (!init_map || lio_diag.post_map_group_count >= 20)
+        return;
+
+    Eigen::Vector3d pos, vel, gravity, acc_bias, gyro_bias;
+    V3D euler_deg;
+    get_lio_diag_state(pos, vel, gravity, acc_bias, gyro_bias, euler_deg);
+
+    const std::uint64_t nearest_delta = lio_diag.nearest_reject - nearest_before;
+    const std::uint64_t plane_delta = lio_diag.plane_reject - plane_before;
+    const std::uint64_t residual_delta = lio_diag.residual_reject - residual_before;
+    const char *reason = "matched_or_other";
+    if (nearest_delta > 0)
+        reason = "nearest";
+    else if (plane_delta > 0)
+        reason = "plane";
+    else if (residual_delta > 0)
+        reason = "residual";
+    else if (!update_ok)
+        reason = "invalid";
+
+    std::cout << "[LIO-DIAG] FIRST20_GROUP"
+              << " index=" << lio_diag.post_map_group_count
+              << " dt=" << dt
+              << " state_pos=" << pos.transpose()
+              << " state_vel=" << vel.transpose()
+              << " gravity=" << gravity.transpose()
+              << " effect_num=" << lio_diag.effect_num_last
+              << " update=" << (update_ok ? "SUCCESS" : "FAIL")
+              << " reject_reason=" << reason
+              << " nearest_reject=" << nearest_delta
+              << " plane_reject=" << plane_delta
+              << " residual_reject=" << residual_delta
+              << std::endl;
+    lio_diag.post_map_group_count++;
+}
+
+void report_lio_diagnostics_if_due()
+{
+    const double now = omp_get_wtime();
+    if (now - lio_diag_last_report_time < 1.0)
+        return;
+    lio_diag_last_report_time = now;
+
+    const double undistort_mean = lio_diag.undistort_samples == 0
+        ? 0.0
+        : static_cast<double>(lio_diag.undistort_sum) / lio_diag.undistort_samples;
+    const double down_mean = lio_diag.down_samples == 0
+        ? 0.0
+        : static_cast<double>(lio_diag.down_sum) / lio_diag.down_samples;
+    const double effect_mean = lio_diag.effect_num_samples == 0
+        ? 0.0
+        : static_cast<double>(lio_diag.effect_num_sum) / lio_diag.effect_num_samples;
+    const int map_points = init_map ? ikdtree.validnum() : init_feats_world->size();
+
+    Eigen::Vector3d state_pos, state_vel, state_gravity, state_acc_bias, state_gyro_bias;
+    V3D state_euler_deg;
+    get_lio_diag_state(state_pos, state_vel, state_gravity, state_acc_bias, state_gyro_bias, state_euler_deg);
+    if (init_map && !lio_diag_state_init_valid)
+    {
+        lio_diag_state_pos_init = state_pos;
+        lio_diag_state_init_valid = true;
+    }
+    const double state_position_drift = lio_diag_state_init_valid
+        ? (state_pos - lio_diag_state_pos_init).norm()
+        : std::numeric_limits<double>::quiet_NaN();
+
+    std::vector<double> nearest_distances = lio_diag.nearest_success_distances;
+    std::sort(nearest_distances.begin(), nearest_distances.end());
+    const auto nearest_quantile = [&nearest_distances](double q) {
+        if (nearest_distances.empty())
+            return std::numeric_limits<double>::quiet_NaN();
+        const std::size_t index = static_cast<std::size_t>(q * (nearest_distances.size() - 1));
+        return nearest_distances[index];
+    };
+    double nearest_mean = 0.0;
+    for (const double distance : nearest_distances)
+        nearest_mean += distance;
+    if (!nearest_distances.empty())
+        nearest_mean /= nearest_distances.size();
+    else
+        nearest_mean = std::numeric_limits<double>::quiet_NaN();
+
+    std::cout << "[LIO-DIAG]"
+              << " frames=" << lio_diag.frame_count
+              << " sync_ok=" << lio_diag.sync_package_ok
+              << " sync_fail=" << lio_diag.sync_package_fail
+              << " imu_process_ok=" << lio_diag.imu_process_count
+              << " imu_process_count=" << lio_diag.imu_process_count
+              << " feats_undistort_mean=" << undistort_mean
+              << " feats_down_mean=" << down_mean
+              << " map_initialized=" << (init_map ? "YES" : "NO")
+              << " map_points=" << map_points
+              << " time_groups=" << lio_diag.time_groups_last
+              << " ekf_attempts=" << lio_diag.ekf_update_attempts
+              << " ekf_success=" << lio_diag.ekf_update_success
+              << " ekf_fail=" << lio_diag.ekf_update_fail
+              << " effect_num=" << lio_diag.effect_num_last
+              << " effect_num_last=" << lio_diag.effect_num_last
+              << " effect_num_mean=" << effect_mean
+              << " effect_num_zero_count=" << lio_diag.effect_num_zero_count
+              << " nearest_query_count=" << lio_diag.nearest_query_count
+              << " nearest_reject=" << lio_diag.nearest_reject
+              << " nearest_too_few=" << lio_diag.nearest_too_few_count
+              << " nearest_too_far=" << lio_diag.nearest_too_far_count
+              << " nearest_other_reject=" << lio_diag.nearest_other_reject_count
+              << " plane_reject=" << lio_diag.plane_reject
+              << " residual_reject=" << lio_diag.residual_reject
+              << " invalid_reject=" << lio_diag.effect_num_zero_count
+              << " other_invalid_count=" << 0
+              << " odom_publish=" << lio_diag.odom_publish_count
+              << " tf_publish=" << lio_diag.tf_publish_count
+              << " registered_cloud_publish=" << lio_diag.registered_cloud_publish_count
+              << std::endl;
+
+    std::cout << "[LIO-DIAG] NEAREST_DISTANCE"
+              << " min=" << (nearest_distances.empty() ? std::numeric_limits<double>::quiet_NaN() : nearest_distances.front())
+              << " mean=" << nearest_mean
+              << " p50=" << nearest_quantile(0.50)
+              << " p95=" << nearest_quantile(0.95)
+              << " max=" << (nearest_distances.empty() ? std::numeric_limits<double>::quiet_NaN() : nearest_distances.back())
+              << std::endl;
+
+    std::cout << "[LIO-DIAG] STATE"
+              << " STATE_POS_X=" << state_pos.x()
+              << " STATE_POS_Y=" << state_pos.y()
+              << " STATE_POS_Z=" << state_pos.z()
+              << " STATE_VEL_X=" << state_vel.x()
+              << " STATE_VEL_Y=" << state_vel.y()
+              << " STATE_VEL_Z=" << state_vel.z()
+              << " STATE_ROLL_DEG=" << state_euler_deg(0)
+              << " STATE_PITCH_DEG=" << state_euler_deg(1)
+              << " STATE_YAW_DEG=" << state_euler_deg(2)
+              << " STATE_GRAV_X=" << state_gravity.x()
+              << " STATE_GRAV_Y=" << state_gravity.y()
+              << " STATE_GRAV_Z=" << state_gravity.z()
+              << " STATE_ACC_BIAS_X=" << state_acc_bias.x()
+              << " STATE_ACC_BIAS_Y=" << state_acc_bias.y()
+              << " STATE_ACC_BIAS_Z=" << state_acc_bias.z()
+              << " STATE_GYRO_BIAS_X=" << state_gyro_bias.x()
+              << " STATE_GYRO_BIAS_Y=" << state_gyro_bias.y()
+              << " STATE_GYRO_BIAS_Z=" << state_gyro_bias.z()
+              << " STATE_POSITION_DRIFT_FROM_INIT_M=" << state_position_drift
+              << " STATE_VELOCITY_NORM=" << state_vel.norm()
+              << " IMU_ACC_MEAN_X=" << p_imu->mean_acc.x()
+              << " IMU_ACC_MEAN_Y=" << p_imu->mean_acc.y()
+              << " IMU_ACC_MEAN_Z=" << p_imu->mean_acc.z()
+              << " IMU_ACC_NORM=" << p_imu->mean_acc.norm()
+              << " IMU_GYRO_MEAN_X=" << p_imu->mean_gyr_value().x()
+              << " IMU_GYRO_MEAN_Y=" << p_imu->mean_gyr_value().y()
+              << " IMU_GYRO_MEAN_Z=" << p_imu->mean_gyr_value().z()
+              << std::endl;
+
+    std::cout << "[LIO-DIAG] EKF_CUMULATIVE_FIRST200"
+              << " TRACE_COUNT=" << lio_diag_trace_count
+              << " CUM_PROP_VEL_CHANGE=" << lio_diag_cum_prop_vel.transpose()
+              << " CUM_PROP_VEL_CHANGE_NORM_SUM=" << lio_diag_cum_prop_vel_norm
+              << " CUM_EKF_VEL_CHANGE=" << lio_diag_cum_ekf_vel.transpose()
+              << " CUM_EKF_VEL_CHANGE_NORM_SUM=" << lio_diag_cum_ekf_vel_norm
+              << " CUM_PROP_ROT_CHANGE_DEG=" << lio_diag_cum_prop_rot.transpose()
+              << " CUM_PROP_ROT_CHANGE_NORM_SUM=" << lio_diag_cum_prop_rot_norm
+              << " CUM_EKF_ROT_CHANGE_DEG=" << lio_diag_cum_ekf_rot.transpose()
+              << " CUM_EKF_ROT_CHANGE_NORM_SUM=" << lio_diag_cum_ekf_rot_norm
+              << " CUM_EKF_ACC_BIAS_CHANGE=" << lio_diag_cum_ekf_acc_bias.transpose()
+              << " CUM_EKF_GYRO_BIAS_CHANGE=" << lio_diag_cum_ekf_gyro_bias.transpose()
+              << std::endl;
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> plane_solver(lio_diag.plane_normal_outer_sum);
+    const Eigen::Vector3d plane_eigenvalues_ascending = plane_solver.eigenvalues();
+    const double lambda1 = plane_eigenvalues_ascending(2);
+    const double lambda2 = plane_eigenvalues_ascending(1);
+    const double lambda3 = plane_eigenvalues_ascending(0);
+    const double plane_condition_ratio = lambda1 > 0.0
+        ? lambda3 / lambda1
+        : std::numeric_limits<double>::quiet_NaN();
+    const double normal_count = static_cast<double>(lio_diag.plane_normal_count);
+    std::cout << "[LIO-DIAG] PLANE_NORMAL_EIGEN"
+              << " PLANE_NORMAL_EIGENVALUES=" << lambda1 << "," << lambda2 << "," << lambda3
+              << " PLANE_NORMAL_CONDITION_RATIO=" << plane_condition_ratio
+              << " NORMAL_Z_DOMINANT_RATIO=" << (normal_count > 0.0 ? lio_diag.normal_z_dominant_count / normal_count : 0.0)
+              << " NORMAL_X_DOMINANT_RATIO=" << (normal_count > 0.0 ? lio_diag.normal_x_dominant_count / normal_count : 0.0)
+              << " NORMAL_Y_DOMINANT_RATIO=" << (normal_count > 0.0 ? lio_diag.normal_y_dominant_count / normal_count : 0.0)
+              << " PLANE_NORMAL_COUNT=" << lio_diag.plane_normal_count
+              << std::endl;
+
+    std::cout << "[LIO-DIAG] SPACE";
+    if (init_map)
+    {
+        const BoxPointType map_box = ikdtree.tree_range();
+        const Eigen::Vector3d map_min(map_box.vertex_min[0], map_box.vertex_min[1], map_box.vertex_min[2]);
+        const Eigen::Vector3d map_max(map_box.vertex_max[0], map_box.vertex_max[1], map_box.vertex_max[2]);
+        const Eigen::Vector3d map_center = 0.5 * (map_min + map_max);
+        std::cout << " MAP_BBOX_X_MIN=" << map_min.x()
+                  << " MAP_BBOX_X_MAX=" << map_max.x()
+                  << " MAP_BBOX_Y_MIN=" << map_min.y()
+                  << " MAP_BBOX_Y_MAX=" << map_max.y()
+                  << " MAP_BBOX_Z_MIN=" << map_min.z()
+                  << " MAP_BBOX_Z_MAX=" << map_max.z()
+                  << " MAP_CENTER_X=" << map_center.x()
+                  << " MAP_CENTER_Y=" << map_center.y()
+                  << " MAP_CENTER_Z=" << map_center.z();
+        if (lio_diag_scan_bbox_valid)
+        {
+            const Eigen::Vector3d scan_center = 0.5 * (lio_diag_scan_bbox_min + lio_diag_scan_bbox_max);
+            std::cout << " CURRENT_SCAN_WORLD_BBOX_X_MIN=" << lio_diag_scan_bbox_min.x()
+                      << " CURRENT_SCAN_WORLD_BBOX_X_MAX=" << lio_diag_scan_bbox_max.x()
+                      << " CURRENT_SCAN_WORLD_BBOX_Y_MIN=" << lio_diag_scan_bbox_min.y()
+                      << " CURRENT_SCAN_WORLD_BBOX_Y_MAX=" << lio_diag_scan_bbox_max.y()
+                      << " CURRENT_SCAN_WORLD_BBOX_Z_MIN=" << lio_diag_scan_bbox_min.z()
+                      << " CURRENT_SCAN_WORLD_BBOX_Z_MAX=" << lio_diag_scan_bbox_max.z()
+                      << " SCAN_WORLD_CENTER_X=" << scan_center.x()
+                      << " SCAN_WORLD_CENTER_Y=" << scan_center.y()
+                      << " SCAN_WORLD_CENTER_Z=" << scan_center.z()
+                      << " MAP_SCAN_CENTER_DISTANCE_M=" << (map_center - scan_center).norm();
+        }
+        else
+        {
+            std::cout << " CURRENT_SCAN_WORLD_BBOX=UNAVAILABLE";
+        }
+    }
+    else
+    {
+        std::cout << " MAP_BBOX=UNAVAILABLE CURRENT_SCAN_WORLD_BBOX=UNAVAILABLE";
+    }
+    std::cout << std::endl;
+}
 
 void SigHandle(int sig)
 {
@@ -260,6 +640,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
     mtx_buffer.lock();
 
     scan_count++;
+    lio_diag.frame_count++;
 
     double preprocess_start_time = omp_get_wtime();
 
@@ -690,6 +1071,7 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
         laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
         laserCloudmsg.header.frame_id = "camera_init";
         pubLaserCloudFullRes->publish(laserCloudmsg);
+        lio_diag.registered_cloud_publish_count++;
         publish_count -= PUBFRAME_PERIOD;
     }
 
@@ -786,6 +1168,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     set_posestamp(odomAftMapped.pose.pose);
 
     pubOdomAftMapped->publish(odomAftMapped);
+    lio_diag.odom_publish_count++;
 
     // tf2::Transform transform;
     // tf2::Quaternion q;
@@ -809,6 +1192,7 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     trans_odom_to_base.header = odomAftMapped.header;
     trans_odom_to_base.child_frame_id = odomAftMapped.child_frame_id;
     tf_br->sendTransform(trans_odom_to_base);
+    lio_diag.tf_publish_count++;
 }
 
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
@@ -940,12 +1324,15 @@ int main(int argc, char **argv)
             break;
 
         rclcpp::spin_some(node);
+        report_lio_diagnostics_if_due();
 
         if (sync_packages(Measures) == false)
         {
+            lio_diag.sync_package_fail++;
             rate.sleep();
             continue;
         }
+        lio_diag.sync_package_ok++;
 
         if (flg_first_scan)
         {
@@ -969,7 +1356,10 @@ int main(int argc, char **argv)
         update_time = 0;
         t0 = omp_get_wtime();
 
+        lio_diag.imu_process_count++;
         p_imu->Process(Measures, feats_undistort);
+        lio_diag.undistort_samples++;
+        lio_diag.undistort_sum += feats_undistort->points.size();
 
         if (feats_undistort->empty() || feats_undistort == NULL)
         {
@@ -1043,6 +1433,9 @@ int main(int argc, char **argv)
         }
         time_seq = time_compressing<int>(feats_down_body);
         feats_down_size = feats_down_body->points.size();
+        lio_diag.down_samples++;
+        lio_diag.down_sum += feats_down_size;
+        lio_diag.time_groups_last = time_seq.size();
 
         /*** initialize the map kdtree ***/
         if (!init_map)
@@ -1058,6 +1451,7 @@ int main(int argc, char **argv)
             {
                 pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
             }
+            update_lio_diag_scan_bbox();
 
             for (size_t i = 0; i < feats_down_world->size(); i++)
             {
@@ -1069,6 +1463,15 @@ int main(int argc, char **argv)
 
             ikdtree.Build(init_feats_world->points);
             init_map = true;
+
+            if (!lio_diag.map_initialized_reported)
+            {
+                lio_diag.map_initialized_reported = true;
+                std::cout << "[LIO-DIAG] MAP_INITIALIZED"
+                          << " map_points=" << ikdtree.validnum()
+                          << " feats_down=" << feats_down_size
+                          << std::endl;
+            }
 
             publish_init_kdtree(pubLaserCloudMap);
             continue;
@@ -1135,6 +1538,7 @@ int main(int argc, char **argv)
                 PointType &point_body = feats_down_body->points[idx + time_seq[k]];
 
                 time_current = point_body.curvature / 1000.0 + pcl_beg_time;
+                const LioDiagStateSnapshot ekf_pre_state = snapshot_lio_state(kf_output.x_);
 
                 if (is_first_frame)
                 {
@@ -1217,11 +1621,32 @@ int main(int argc, char **argv)
                     idx += time_seq[k];
                     continue;
                 }
-                if (!kf_output.update_iterated_dyn_share_modified())
+                const std::uint64_t nearest_before = lio_diag.nearest_reject;
+                const std::uint64_t plane_before = lio_diag.plane_reject;
+                const std::uint64_t residual_before = lio_diag.residual_reject;
+                lio_diag.ekf_update_attempts++;
+                const LioDiagStateSnapshot ekf_propagated_state = snapshot_lio_state(kf_output.x_);
+                const bool ekf_update_ok = kf_output.update_iterated_dyn_share_modified();
+                const LioDiagStateSnapshot ekf_post_state = snapshot_lio_state(kf_output.x_);
+                record_ekf_trace(ekf_pre_state, ekf_propagated_state, ekf_post_state, ekf_update_ok);
+                report_first_twenty_group(dt, ekf_update_ok, nearest_before, plane_before, residual_before);
+                if (!ekf_update_ok)
                 {
+                    lio_diag.ekf_update_fail++;
+                    if (!lio_diag.first_ekf_failure_reported)
+                    {
+                        lio_diag.first_ekf_failure_reported = true;
+                        std::cout << "[LIO-DIAG] FIRST_EKF_FAILURE"
+                                  << " effect_num=" << lio_diag.effect_num_last
+                                  << " nearest_reject=" << lio_diag.nearest_reject
+                                  << " plane_reject=" << lio_diag.plane_reject
+                                  << " residual_reject=" << lio_diag.residual_reject
+                                  << std::endl;
+                    }
                     idx = idx + time_seq[k];
                     continue;
                 }
+                lio_diag.ekf_update_success++;
 
                 if (prop_at_freq_of_imu)
                 {
@@ -1276,6 +1701,7 @@ int main(int argc, char **argv)
             {
                 PointType &point_body = feats_down_body->points[idx + time_seq[k]];
                 time_current = point_body.curvature / 1000.0 + pcl_beg_time;
+                const LioDiagStateSnapshot ekf_pre_state = snapshot_lio_state(kf_input.x_);
                 if (is_first_frame)
                 {
                     while (time_current > get_time_in_sec(imu_next.header.stamp))
@@ -1351,11 +1777,32 @@ int main(int argc, char **argv)
                     idx += time_seq[k];
                     continue;
                 }
-                if (!kf_input.update_iterated_dyn_share_modified())
+                const std::uint64_t nearest_before = lio_diag.nearest_reject;
+                const std::uint64_t plane_before = lio_diag.plane_reject;
+                const std::uint64_t residual_before = lio_diag.residual_reject;
+                lio_diag.ekf_update_attempts++;
+                const LioDiagStateSnapshot ekf_propagated_state = snapshot_lio_state(kf_input.x_);
+                const bool ekf_update_ok = kf_input.update_iterated_dyn_share_modified();
+                const LioDiagStateSnapshot ekf_post_state = snapshot_lio_state(kf_input.x_);
+                record_ekf_trace(ekf_pre_state, ekf_propagated_state, ekf_post_state, ekf_update_ok);
+                report_first_twenty_group(dt, ekf_update_ok, nearest_before, plane_before, residual_before);
+                if (!ekf_update_ok)
                 {
+                    lio_diag.ekf_update_fail++;
+                    if (!lio_diag.first_ekf_failure_reported)
+                    {
+                        lio_diag.first_ekf_failure_reported = true;
+                        std::cout << "[LIO-DIAG] FIRST_EKF_FAILURE"
+                                  << " effect_num=" << lio_diag.effect_num_last
+                                  << " nearest_reject=" << lio_diag.nearest_reject
+                                  << " plane_reject=" << lio_diag.plane_reject
+                                  << " residual_reject=" << lio_diag.residual_reject
+                                  << std::endl;
+                    }
                     idx = idx + time_seq[k];
                     continue;
                 }
+                lio_diag.ekf_update_success++;
 
                 solve_start = omp_get_wtime();
 
@@ -1385,6 +1832,8 @@ int main(int argc, char **argv)
                 idx = idx + time_seq[k];
             }
         }
+
+        update_lio_diag_scan_bbox();
 
         /******* Publish odometry downsample *******/
         if (!publish_odometry_without_downsample)

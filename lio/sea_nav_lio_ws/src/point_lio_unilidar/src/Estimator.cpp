@@ -1,6 +1,8 @@
 // #include <../include/IKFoM/IKFoM_toolkit/esekfom/esekfom.hpp>
 #include "Estimator.h"
 
+#include <cmath>
+
 PointCloudXYZI::Ptr normvec(new PointCloudXYZI(100000, 1));
 std::vector<int> time_seq;
 PointCloudXYZI::Ptr feats_down_body(new PointCloudXYZI());
@@ -20,6 +22,36 @@ state_input state_in;
 state_output state_out;
 input_ikfom input_in;
 V3D angvel_avr, acc_avr;
+
+LioDiagnosticCounters lio_diag;
+
+void lio_diag_record_effect_num(int effect_num)
+{
+	lio_diag.effect_num_last = effect_num;
+	lio_diag.effect_num_samples++;
+	lio_diag.effect_num_sum += static_cast<std::uint64_t>(effect_num);
+	if (effect_num == 0)
+	{
+		lio_diag.effect_num_zero_count++;
+	}
+}
+
+void lio_diag_record_plane_normal(const V3D &normal)
+{
+	const double norm = normal.norm();
+	if (!std::isfinite(norm) || norm <= 0.0)
+		return;
+	const V3D unit = normal / norm;
+	lio_diag.plane_normal_outer_sum += unit * unit.transpose();
+	lio_diag.plane_normal_count++;
+	const V3D abs_unit = unit.cwiseAbs();
+	if (abs_unit.x() >= abs_unit.y() && abs_unit.x() >= abs_unit.z())
+		lio_diag.normal_x_dominant_count++;
+	else if (abs_unit.y() >= abs_unit.z())
+		lio_diag.normal_y_dominant_count++;
+	else
+		lio_diag.normal_z_dominant_count++;
+}
 
 V3D Lidar_T_wrt_IMU(Zero3d);
 M3D Lidar_R_wrt_IMU(Eye3d);
@@ -197,21 +229,33 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 		{
 			auto &points_near = Nearest_Points[idx+j+1];
 			
+			lio_diag.nearest_query_count++;
 			ikdtree.Nearest_Search(point_world_j, NUM_MATCH_POINTS, points_near, pointSearchSqDis, 2.236); //1.0); //, 3.0); // 2.236;
 			
 			if ((points_near.size() < NUM_MATCH_POINTS) || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5) // 5)
 			{
+				lio_diag.nearest_reject++;
+				if (points_near.size() < NUM_MATCH_POINTS)
+					lio_diag.nearest_too_few_count++;
+				else if (pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5)
+					lio_diag.nearest_too_far_count++;
+				else
+					lio_diag.nearest_other_reject_count++;
 				point_selected_surf[idx+j+1] = false;
 			}
 			else
 			{
+				lio_diag.nearest_success_distances.push_back(
+					std::sqrt(static_cast<double>(pointSearchSqDis[NUM_MATCH_POINTS - 1])));
 				point_selected_surf[idx+j+1] = false;
-				if (esti_plane(pabcd, points_near, plane_thr)) //(planeValid)
+				const bool plane_valid = esti_plane(pabcd, points_near, plane_thr);
+				if (plane_valid) //(planeValid)
 				{
 					float pd2 = pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3);
 					
 					if (p_body.norm() > match_s * pd2 * pd2)
 					{
+						lio_diag_record_plane_normal(V3D(pabcd(0), pabcd(1), pabcd(2)));
 						point_selected_surf[idx+j+1] = true;
 						normvec->points[j].x = pabcd(0);
 						normvec->points[j].y = pabcd(1);
@@ -219,10 +263,19 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 						normvec->points[j].intensity = pabcd(3);
 						effect_num_k ++;
 					}
+					else
+					{
+						lio_diag.residual_reject++;
+					}
+				}
+				else
+				{
+					lio_diag.plane_reject++;
 				}  
 			}
 		}
 	}
+	lio_diag_record_effect_num(effect_num_k);
 	if (effect_num_k == 0) 
 	{
 		ekfom_data.valid = false;
@@ -283,21 +336,33 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 		{
 			auto &points_near = Nearest_Points[idx+j+1];
 			
+			lio_diag.nearest_query_count++;
 			ikdtree.Nearest_Search(point_world_j, NUM_MATCH_POINTS, points_near, pointSearchSqDis, 2.236); 
 			
 			if ((points_near.size() < NUM_MATCH_POINTS) || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5)
 			{
+				lio_diag.nearest_reject++;
+				if (points_near.size() < NUM_MATCH_POINTS)
+					lio_diag.nearest_too_few_count++;
+				else if (pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5)
+					lio_diag.nearest_too_far_count++;
+				else
+					lio_diag.nearest_other_reject_count++;
 				point_selected_surf[idx+j+1] = false;
 			}
 			else
 			{
+				lio_diag.nearest_success_distances.push_back(
+					std::sqrt(static_cast<double>(pointSearchSqDis[NUM_MATCH_POINTS - 1])));
 				point_selected_surf[idx+j+1] = false;
-				if (esti_plane(pabcd, points_near, plane_thr)) //(planeValid)
+				const bool plane_valid = esti_plane(pabcd, points_near, plane_thr);
+				if (plane_valid) //(planeValid)
 				{
 					float pd2 = pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3);
 					
 					if (p_body.norm() > match_s * pd2 * pd2)
 					{
+						lio_diag_record_plane_normal(V3D(pabcd(0), pabcd(1), pabcd(2)));
 						// point_selected_surf[i] = true;
 						point_selected_surf[idx+j+1] = true;
 						normvec->points[j].x = pabcd(0);
@@ -306,10 +371,19 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 						normvec->points[j].intensity = pabcd(3);
 						effect_num_k ++;
 					}
+					else
+					{
+						lio_diag.residual_reject++;
+					}
+				}
+				else
+				{
+					lio_diag.plane_reject++;
 				}  
 			}
 		}
 	}
+	lio_diag_record_effect_num(effect_num_k);
 	if (effect_num_k == 0) 
 	{
 		ekfom_data.valid = false;

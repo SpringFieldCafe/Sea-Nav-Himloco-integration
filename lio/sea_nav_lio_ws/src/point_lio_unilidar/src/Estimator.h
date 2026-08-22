@@ -1,6 +1,9 @@
 #ifndef Estimator_H
 #define Estimator_H
 
+#include <cstdint>
+#include <vector>
+
 #include <../include/IKFoM/IKFoM_toolkit/esekfom/esekfom.hpp>
 #include "common_lib.h"
 #include "parameters.h"
@@ -25,6 +28,50 @@ extern int effct_feat_num;
 extern int k;
 extern int idx;
 extern V3D angvel_avr, acc_avr;
+
+struct LioDiagnosticCounters
+{
+    std::uint64_t frame_count = 0;
+    std::uint64_t sync_package_ok = 0;
+    std::uint64_t sync_package_fail = 0;
+    std::uint64_t imu_process_count = 0;
+    std::uint64_t undistort_samples = 0;
+    std::uint64_t undistort_sum = 0;
+    std::uint64_t down_samples = 0;
+    std::uint64_t down_sum = 0;
+    std::uint64_t time_groups_last = 0;
+    std::uint64_t odom_publish_count = 0;
+    std::uint64_t tf_publish_count = 0;
+    std::uint64_t registered_cloud_publish_count = 0;
+    bool map_initialized_reported = false;
+    std::uint64_t nearest_reject = 0;
+    std::uint64_t nearest_query_count = 0;
+    std::uint64_t nearest_too_few_count = 0;
+    std::uint64_t nearest_too_far_count = 0;
+    std::uint64_t nearest_other_reject_count = 0;
+    std::vector<double> nearest_success_distances;
+    std::uint64_t plane_reject = 0;
+    std::uint64_t residual_reject = 0;
+    std::uint64_t effect_num_samples = 0;
+    std::uint64_t effect_num_sum = 0;
+    std::uint64_t effect_num_zero_count = 0;
+    Eigen::Matrix3d plane_normal_outer_sum = Eigen::Matrix3d::Zero();
+    std::uint64_t plane_normal_count = 0;
+    std::uint64_t normal_z_dominant_count = 0;
+    std::uint64_t normal_x_dominant_count = 0;
+    std::uint64_t normal_y_dominant_count = 0;
+    std::uint64_t ekf_update_attempts = 0;
+    std::uint64_t ekf_update_success = 0;
+    std::uint64_t ekf_update_fail = 0;
+    bool first_ekf_failure_reported = false;
+    std::uint64_t post_map_group_count = 0;
+    int effect_num_last = 0;
+};
+
+extern LioDiagnosticCounters lio_diag;
+
+void lio_diag_record_effect_num(int effect_num);
+void lio_diag_record_plane_normal(const V3D &normal);
 
 extern V3D Lidar_T_wrt_IMU; //(Zero3d);
 extern M3D Lidar_R_wrt_IMU; //(Eye3d);
