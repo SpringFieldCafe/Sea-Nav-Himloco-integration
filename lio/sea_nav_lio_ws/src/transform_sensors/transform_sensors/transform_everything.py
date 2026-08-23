@@ -3,14 +3,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import Imu
-from sensor_msgs.msg import PointCloud2, PointField
-from geometry_msgs.msg import TransformStamped, Vector3
+from sensor_msgs.msg import PointCloud2
 import sensor_msgs_py.point_cloud2 as pc2
-import tf_transformations
-
-from transforms3d.quaternions import quat2mat
-
-from copy import deepcopy
 import numpy as np
 import yaml
 
@@ -18,6 +12,13 @@ import os
 import math
 
 class Repuber(Node):
+    # Unitree's L1 cloud and embedded IMU frames are parallel and co-oriented.
+    # Point-LIO owns the L1-to-IMU translation; this node only normalizes the
+    # message contract and applies calibration in the native sensor axes.
+    FRAME_CONTRACT = 'unilidar_native_sensor_v1'
+    RAW_CLOUD_FRAME = 'utlidar_lidar'
+    RAW_IMU_FRAME = 'utlidar_imu'
+
     def __init__(self):
         super().__init__('sensor_transformer')
         self.declare_parameter('imu_ang_z2x_proj', float('nan'))
@@ -34,10 +35,8 @@ class Repuber(Node):
         self.time_stamp_offset = 0
         self.time_stamp_offset_set = False
         
-        self.cam_offset = 0.046825
-
-        # Load calibration data. Explicit ROS parameters override only the two
-        # projection terms; all other calibration values keep their old path.
+        # Load only calibration produced for this frame contract. A calibration
+        # generated before the frame fix must not be silently reused.
         default_calib_data = {
                 'acc_bias_x': 0.0,
                 'acc_bias_y': 0.0,
@@ -45,20 +44,28 @@ class Repuber(Node):
                 'ang_bias_x': 0.0,
                 'ang_bias_y': 0.0,
                 'ang_bias_z': 0.0,
-                'ang_z2x_proj': 0.15,
-                'ang_z2y_proj': -0.28
+                'ang_z2x_proj': 0.0,
+                'ang_z2y_proj': 0.0
             }
         calib_data = default_calib_data
         calib_source = 'legacy_fallback_default'
         calib_file_path = os.path.join(os.path.expanduser('~'), 'Desktop/imu_calib_data.yaml')
         try:
-            calib_file = open(calib_file_path, 'r')
-            calib_data = yaml.load(calib_file, Loader=yaml.FullLoader)
-            calib_source = 'calibration_yaml'
-            print("imu_calib.yaml loaded")
-            calib_file.close()
-        except:
-            print("imu_calib.yaml not found, using defualt values")
+            with open(calib_file_path, 'r') as calib_file:
+                candidate = yaml.load(calib_file, Loader=yaml.FullLoader) or {}
+            if candidate.get('frame_contract') != self.FRAME_CONTRACT:
+                print('IMU_CALIBRATION_INVALIDATED=YES')
+                print('IMU_CALIBRATION_WARNING=calibration requires recalibration for unilidar native frame contract')
+                print('IMU_CALIBRATION_FILE_IGNORED=%s' % calib_file_path)
+            else:
+                calib_data = candidate
+                calib_source = 'calibration_yaml'
+                print("imu_calib.yaml loaded")
+        except OSError:
+            print("imu_calib.yaml not found, using default values")
+
+        if calib_source != 'calibration_yaml':
+            print('NO_VALID_NATIVE_IMU_CALIBRATION')
             
         self.acc_bias_x = calib_data['acc_bias_x']
         self.acc_bias_y = calib_data['acc_bias_y']
@@ -84,38 +91,22 @@ class Repuber(Node):
         print(f"IMU_ANG_Z2Y_PROJ={self.ang_z2y_proj:.9f}")
         print(f"IMU_CALIB_SOURCE={calib_source}")
                 
-        self.body2cloud_trans = TransformStamped()
-        self.body2cloud_trans.header.stamp = self.get_clock().now().to_msg()
-        self.body2cloud_trans.header.frame_id = "body"
-        self.body2cloud_trans.child_frame_id = "utlidar_lidar_1"
-        self.body2cloud_trans.transform.translation.x = 0.0
-        self.body2cloud_trans.transform.translation.y = 0.0
-        self.body2cloud_trans.transform.translation.z = 0.0
-        quat = tf_transformations.quaternion_from_euler(0, 2.87820258505555555556, 0)
-        self.body2cloud_trans.transform.rotation.x = quat[0]
-        self.body2cloud_trans.transform.rotation.y = quat[1]
-        self.body2cloud_trans.transform.rotation.z = quat[2]
-        self.body2cloud_trans.transform.rotation.w = quat[3]
-        
-        self.body2imu_trans = TransformStamped()
-        self.body2imu_trans.header.stamp = self.get_clock().now().to_msg()
-        self.body2imu_trans.header.frame_id = "body"
-        self.body2imu_trans.child_frame_id = "utlidar_imu_1"
-        self.body2imu_trans.transform.translation.x = 0.0
-        self.body2imu_trans.transform.translation.y = 0.0
-        self.body2imu_trans.transform.translation.z = 0.0
-        quat = tf_transformations.quaternion_from_euler(0, 2.87820258505555555556, 3.14159265358)
-        self.body2imu_trans.transform.rotation.x = quat[0]
-        self.body2imu_trans.transform.rotation.y = quat[1]
-        self.body2imu_trans.transform.rotation.z = quat[2]
-        self.body2imu_trans.transform.rotation.w = quat[3]
-        
+        self.sensor_rotation = np.eye(3)
+
+        # Used only to preserve the existing robot-body self-filter. It is not
+        # applied to the published cloud, whose origin remains the LiDAR.
+        self.base_from_lidar_rotation = np.array([
+            [-0.965512906, 0.0, 0.260355197],
+            [0.0, 1.0, 0.0],
+            [-0.260355197, 0.0, -0.965512906],
+        ])
+        self.base_from_lidar_translation = np.array([0.28945, 0.0, -0.046825])
         self.x_filter_min = -0.7
         self.x_filter_max = -0.1
         self.y_filter_min = -0.3
         self.y_filter_max = 0.3
-        self.z_filter_min = -0.6 - self.cam_offset
-        self.z_filter_max = 0 - self.cam_offset
+        self.z_filter_min = -0.6
+        self.z_filter_max = 0.0
 
     def is_in_filter_box(self, point):
         # Check if the point is in the filter box
@@ -135,19 +126,14 @@ class Repuber(Node):
         cloud_arr = pc2.read_points_list(data)
         points = np.array(cloud_arr)
 
-        transform = self.body2cloud_trans.transform
-        mat = quat2mat(np.array([transform.rotation.w, transform.rotation.x, transform.rotation.y, transform.rotation.z]))
-        translation = np.array([transform.translation.x, transform.translation.y, transform.translation.z])
-        
-        transformed_points = points
-        transformed_points[:, 0:3] = points[:, 0:3] @ mat.T + translation
-        transformed_points[:, 2] -= self.cam_offset
-        i = 0
+        transformed_points = points.copy()
+        body_points = points[:, 0:3] @ self.base_from_lidar_rotation.T
+        body_points += self.base_from_lidar_translation
         remove_list = []
         transformed_points = transformed_points.tolist()
         for i in range(len(transformed_points)):
             transformed_points[i][4] = int(transformed_points[i][4])
-            if self.is_in_filter_box(transformed_points[i]):
+            if self.is_in_filter_box(body_points[i]):
                 remove_list.append(i)
 
         remove_list.sort(reverse=True)
@@ -157,87 +143,39 @@ class Repuber(Node):
         
         elevated_cloud = pc2.create_cloud(data.header, data.fields, transformed_points)
         elevated_cloud.header.stamp = Time(nanoseconds=Time.from_msg(elevated_cloud.header.stamp).nanoseconds + self.time_stamp_offset).to_msg()
-        elevated_cloud.header.frame_id = "body"
+        elevated_cloud.header.frame_id = self.RAW_CLOUD_FRAME
         elevated_cloud.is_dense = data.is_dense
 
         self.cloud_pub.publish(elevated_cloud)
             
-    def transform_vector(self, vector, rotation):
-        # Transform a vector using a given quaternion rotation
-        q_vector = [vector.x, vector.y, vector.z, 0.0]
-        q_rotated = tf_transformations.quaternion_multiply(
-            tf_transformations.quaternion_multiply(rotation, q_vector),
-            tf_transformations.quaternion_conjugate(rotation)
-        )
-        
-        ret_vec = Vector3()
-        ret_vec.x = q_rotated[0]
-        ret_vec.y = q_rotated[1]
-        ret_vec.z = q_rotated[2]
-        return ret_vec
-
-
     def imu_callback(self, data):    
-        trans = np.zeros(3)
-        trans[0] = self.body2imu_trans.transform.translation.x
-        trans[1] = self.body2imu_trans.transform.translation.y
-        trans[2] = self.body2imu_trans.transform.translation.z
-        
-        rot = np.zeros(4)
-        rot[0] = self.body2imu_trans.transform.rotation.x
-        rot[1] = self.body2imu_trans.transform.rotation.y
-        rot[2] = self.body2imu_trans.transform.rotation.z
-        rot[3] = self.body2imu_trans.transform.rotation.w
-        
-        transformed_orientation = tf_transformations.quaternion_multiply(rot, [data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w])
-        
-        x = data.angular_velocity.x
-        y = -data.angular_velocity.y
-        z = -data.angular_velocity.z
-        
-        theta = 15.1 / 180 * 3.1415926
+        angular = self.sensor_rotation @ np.array([
+            data.angular_velocity.x,
+            data.angular_velocity.y,
+            data.angular_velocity.z,
+        ])
+        angular -= np.array([self.ang_bias_x, self.ang_bias_y, self.ang_bias_z])
+        angular[0] += self.ang_z2x_proj * angular[2]
+        angular[1] += self.ang_z2y_proj * angular[2]
 
-        x2 = np.cos(theta) * x - np.sin(theta) * z
-        y2 = y
-        z2 = np.sin(theta) * x + np.cos(theta) * z
-
-        x2 -= self.ang_bias_x
-        y2 -= self.ang_bias_y
-        z2 -= self.ang_bias_z
-        
-        x_comp_rate = self.ang_z2x_proj
-        y_comp_rate = self.ang_z2y_proj
-        
-        x2 += x_comp_rate * z2
-        y2 += y_comp_rate * z2
-        
-        transformed_angular_velocity = Vector3()
-        transformed_angular_velocity.x = x2
-        transformed_angular_velocity.y = y2
-        transformed_angular_velocity.z = z2
-        
-        acc_x = data.linear_acceleration.x
-        acc_y = -data.linear_acceleration.y
-        acc_z = -data.linear_acceleration.z
-        
-        acc_x2 = np.cos(theta) * acc_x - np.sin(theta) * acc_z
-        acc_y2 = acc_y
-        acc_z2 = np.sin(theta) * acc_x + np.cos(theta) * acc_z
-        transformed_linear_acceleration = Vector3()
-        transformed_linear_acceleration.x = acc_x2 - self.acc_bias_x
-        transformed_linear_acceleration.y = acc_y2 - self.acc_bias_y
-        transformed_linear_acceleration.z = acc_z2 - self.acc_bias_z
+        acceleration = self.sensor_rotation @ np.array([
+            data.linear_acceleration.x,
+            data.linear_acceleration.y,
+            data.linear_acceleration.z,
+        ])
+        acceleration -= np.array([self.acc_bias_x, self.acc_bias_y, self.acc_bias_z])
         
 
         transformed_imu = Imu()
         transformed_imu.header.stamp = data.header.stamp
-        transformed_imu.header.frame_id = 'body'
-        transformed_imu.orientation.x = transformed_orientation[0]
-        transformed_imu.orientation.y = transformed_orientation[1]
-        transformed_imu.orientation.z = transformed_orientation[2]
-        transformed_imu.orientation.w = transformed_orientation[3]
-        transformed_imu.angular_velocity = transformed_angular_velocity
-        transformed_imu.linear_acceleration = transformed_linear_acceleration
+        transformed_imu.header.frame_id = self.RAW_IMU_FRAME
+        transformed_imu.orientation = data.orientation
+        transformed_imu.angular_velocity.x = angular[0]
+        transformed_imu.angular_velocity.y = angular[1]
+        transformed_imu.angular_velocity.z = angular[2]
+        transformed_imu.linear_acceleration.x = acceleration[0]
+        transformed_imu.linear_acceleration.y = acceleration[1]
+        transformed_imu.linear_acceleration.z = acceleration[2]
         
         transformed_imu.header.stamp = Time(nanoseconds=Time.from_msg(transformed_imu.header.stamp).nanoseconds + self.time_stamp_offset).to_msg()
         

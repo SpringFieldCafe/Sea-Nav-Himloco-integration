@@ -1,7 +1,10 @@
 #ifndef COMMON_LIB_H
 #define COMMON_LIB_H
 
+#include <cstddef>
+#include <cstdint>
 #include <deque>
+#include <string>
 #include <so3_math.h>
 #include <Eigen/Eigen>
 #include <pcl/point_types.h>
@@ -68,6 +71,21 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     double lidar_last_time;     // 点云结束时间戳，即最后一个点的时间戳
     PointCloudXYZI::Ptr lidar;  // 当前帧点云
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;  // IMU队列
+
+    // Synchronizer diagnostics. These fields are populated alongside the
+    // existing group construction and are never consumed by the estimator.
+    std::uint64_t cloud_receive_order = 0;
+    std::size_t sync_queue_cloud_size_before = 0;
+    std::size_t sync_queue_imu_size_before = 0;
+    std::uint64_t cloud_dropped_before_group = 0;
+    std::uint64_t imu_dropped_before_group = 0;
+    std::string group_form_reason;
+    std::size_t sync_imu_count = 0;
+    double sync_imu_first_stamp = 0.0;
+    double sync_imu_last_stamp = 0.0;
+    std::size_t sync_imu_queue_count = 0;
+    double sync_imu_queue_first_stamp = 0.0;
+    double sync_imu_queue_last_stamp = 0.0;
 };
 
 template <typename T>

@@ -24,6 +24,19 @@ input_ikfom input_in;
 V3D angvel_avr, acc_avr;
 
 LioDiagnosticCounters lio_diag;
+std::vector<int> lio_diag_prematch_axes;
+
+int lio_diag_dominant_normal_axis(const V3D &normal)
+{
+	const V3D absolute = normal.cwiseAbs();
+	if (!absolute.allFinite() || absolute.maxCoeff() <= 0.0)
+		return -1;
+	if (absolute.x() >= absolute.y() && absolute.x() >= absolute.z())
+		return LIO_GEOMETRY_AXIS_X;
+	if (absolute.y() >= absolute.z())
+		return LIO_GEOMETRY_AXIS_Y;
+	return LIO_GEOMETRY_AXIS_Z;
+}
 
 void lio_diag_record_effect_num(int effect_num)
 {
@@ -51,6 +64,140 @@ void lio_diag_record_plane_normal(const V3D &normal)
 		lio_diag.normal_y_dominant_count++;
 	else
 		lio_diag.normal_z_dominant_count++;
+}
+
+void lio_diag_record_prematch_normal(const V3D &normal)
+{
+	const double norm = normal.norm();
+	const int axis = lio_diag_dominant_normal_axis(normal);
+	if (!std::isfinite(norm) || norm <= 0.0 || axis < 0)
+		return;
+	lio_diag.prematch_normal_count++;
+	lio_diag.prematch_normal_axis_count[axis]++;
+}
+
+void lio_diag_record_retention_candidate(std::size_t point_index)
+{
+	const int axis = point_index < lio_diag_prematch_axes.size()
+	    ? lio_diag_prematch_axes[point_index]
+	    : -1;
+	if (axis >= 0 && axis < 3)
+		lio_diag.geometry_candidate_count[axis]++;
+	else
+		lio_diag.geometry_unlabeled_candidates++;
+}
+
+void lio_diag_record_retention_outcome(std::size_t point_index, int outcome)
+{
+	if (outcome < 0 || outcome > LIO_GEOMETRY_OTHER_REJECT)
+		return;
+	const int axis = point_index < lio_diag_prematch_axes.size()
+	    ? lio_diag_prematch_axes[point_index]
+	    : -1;
+	if (axis >= 0 && axis < 3)
+		lio_diag.geometry_outcome_count[axis][outcome]++;
+	else
+		lio_diag.geometry_unlabeled_outcome_count[outcome]++;
+}
+
+namespace
+{
+bool early_geometry_window_active()
+{
+	return lio_diag.ekf_update_attempts > 0 && lio_diag.ekf_update_attempts <= 200;
+}
+
+int prematch_axis_for_point(std::size_t point_index)
+{
+	return point_index < lio_diag_prematch_axes.size()
+	    ? lio_diag_prematch_axes[point_index]
+	    : -1;
+}
+}
+
+void lio_diag_record_early_candidate(std::size_t point_index, bool enabled)
+{
+	if (!enabled)
+		return;
+	const int axis = prematch_axis_for_point(point_index);
+	if (axis >= 0 && axis < 3)
+		lio_diag.early_geometry_candidate_count[axis]++;
+	else
+		lio_diag.early_geometry_unlabeled_candidates++;
+}
+
+void lio_diag_record_early_outcome(std::size_t point_index, int outcome, bool enabled)
+{
+	if (!enabled || outcome < 0 || outcome > LIO_GEOMETRY_OTHER_REJECT)
+		return;
+	const int axis = prematch_axis_for_point(point_index);
+	if (axis >= 0 && axis < 3)
+		lio_diag.early_geometry_outcome_count[axis][outcome]++;
+	else
+		lio_diag.early_geometry_unlabeled_outcome_count[outcome]++;
+}
+
+void lio_diag_record_early_residual(std::size_t point_index, double absolute_residual, bool enabled)
+{
+	if (!enabled || !std::isfinite(absolute_residual))
+		return;
+	const int axis = prematch_axis_for_point(point_index);
+	if (axis >= 0 && axis < 3)
+		lio_diag.early_abs_residuals[axis].push_back(std::abs(absolute_residual));
+}
+
+void lio_diag_reset_early_attempt()
+{
+	lio_diag.early_geometry_attempt_seen = false;
+}
+
+void lio_diag_reset_measurement_attempt()
+{
+	lio_diag.current_accepted_point_count = 0;
+	lio_diag.current_signed_residual_sum = 0.0;
+	lio_diag.current_signed_residuals.clear();
+	lio_diag.current_abs_residual_sum = 0.0;
+	lio_diag.current_abs_residual_max = 0.0;
+	lio_diag.current_abs_residuals.clear();
+	lio_diag.current_normal_sum.setZero();
+	lio_diag.current_normal_abs_sum.setZero();
+	lio_diag.current_normal_x_dominant_count = 0;
+	lio_diag.current_normal_y_dominant_count = 0;
+	lio_diag.current_normal_z_dominant_count = 0;
+}
+
+void lio_diag_record_accepted_measurement(double signed_residual, const V3D &normal)
+{
+	if (!std::isfinite(signed_residual) || !normal.allFinite())
+		return;
+	const double normal_norm = normal.norm();
+	if (!std::isfinite(normal_norm) || normal_norm <= 0.0)
+		return;
+	const V3D unit = normal / normal_norm;
+	const double absolute_residual = std::abs(static_cast<double>(signed_residual));
+	lio_diag.current_accepted_point_count++;
+	lio_diag.current_signed_residual_sum += signed_residual;
+	lio_diag.current_signed_residuals.push_back(signed_residual);
+	lio_diag.current_abs_residual_sum += absolute_residual;
+	lio_diag.current_abs_residual_max = std::max(lio_diag.current_abs_residual_max, absolute_residual);
+	lio_diag.current_abs_residuals.push_back(absolute_residual);
+	lio_diag.current_normal_sum += unit;
+	lio_diag.current_normal_abs_sum += unit.cwiseAbs();
+	const int axis = lio_diag_dominant_normal_axis(unit);
+	if (axis == LIO_GEOMETRY_AXIS_X)
+		lio_diag.current_normal_x_dominant_count++;
+	else if (axis == LIO_GEOMETRY_AXIS_Y)
+		lio_diag.current_normal_y_dominant_count++;
+	else if (axis == LIO_GEOMETRY_AXIS_Z)
+		lio_diag.current_normal_z_dominant_count++;
+}
+
+bool lio_diag_begin_early_attempt()
+{
+	if (!early_geometry_window_active() || lio_diag.early_geometry_attempt_seen)
+		return false;
+	lio_diag.early_geometry_attempt_seen = true;
+	return true;
 }
 
 V3D Lidar_T_wrt_IMU(Zero3d);
@@ -217,6 +364,7 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 	pabcd.setZero();
 	normvec->resize(time_seq[k]);
 	int effect_num_k = 0;
+	const bool record_early = lio_diag_begin_early_attempt();
 	for (int j = 0; j < time_seq[k]; j++)
 	{
 		PointType &point_body_j  = feats_down_body->points[idx+j+1];
@@ -225,6 +373,9 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 		V3D p_body = pbody_list[idx+j+1];
 		V3D p_world;
 		p_world << point_world_j.x, point_world_j.y, point_world_j.z;
+		const std::size_t point_index = static_cast<std::size_t>(idx + j + 1);
+		lio_diag_record_retention_candidate(point_index);
+		lio_diag_record_early_candidate(point_index, record_early);
 		
 		{
 			auto &points_near = Nearest_Points[idx+j+1];
@@ -234,6 +385,8 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 			
 			if ((points_near.size() < NUM_MATCH_POINTS) || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5) // 5)
 			{
+				lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_NEAREST_REJECT);
+				lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_NEAREST_REJECT, record_early);
 				lio_diag.nearest_reject++;
 				if (points_near.size() < NUM_MATCH_POINTS)
 					lio_diag.nearest_too_few_count++;
@@ -252,10 +405,15 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 				if (plane_valid) //(planeValid)
 				{
 					float pd2 = pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3);
+					lio_diag_record_early_residual(point_index, pd2, record_early);
 					
 					if (p_body.norm() > match_s * pd2 * pd2)
 					{
-						lio_diag_record_plane_normal(V3D(pabcd(0), pabcd(1), pabcd(2)));
+						lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_ACCEPTED);
+						lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_ACCEPTED, record_early);
+						const V3D accepted_normal(pabcd(0), pabcd(1), pabcd(2));
+						lio_diag_record_plane_normal(accepted_normal);
+						lio_diag_record_accepted_measurement(pd2, accepted_normal);
 						point_selected_surf[idx+j+1] = true;
 						normvec->points[j].x = pabcd(0);
 						normvec->points[j].y = pabcd(1);
@@ -265,11 +423,15 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 					}
 					else
 					{
+						lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_RESIDUAL_REJECT);
+						lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_RESIDUAL_REJECT, record_early);
 						lio_diag.residual_reject++;
 					}
 				}
 				else
 				{
+					lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_PLANE_REJECT);
+					lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_PLANE_REJECT, record_early);
 					lio_diag.plane_reject++;
 				}  
 			}
@@ -325,6 +487,7 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 	
 	normvec->resize(time_seq[k]);
 	int effect_num_k = 0;
+	const bool record_early = lio_diag_begin_early_attempt();
 	for (int j = 0; j < time_seq[k]; j++)
 	{
 		PointType &point_body_j  = feats_down_body->points[idx+j+1];
@@ -333,6 +496,9 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 		V3D p_body = pbody_list[idx+j+1];
 		V3D p_world;
 		p_world << point_world_j.x, point_world_j.y, point_world_j.z;
+		const std::size_t point_index = static_cast<std::size_t>(idx + j + 1);
+		lio_diag_record_retention_candidate(point_index);
+		lio_diag_record_early_candidate(point_index, record_early);
 		{
 			auto &points_near = Nearest_Points[idx+j+1];
 			
@@ -341,6 +507,8 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 			
 			if ((points_near.size() < NUM_MATCH_POINTS) || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5)
 			{
+				lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_NEAREST_REJECT);
+				lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_NEAREST_REJECT, record_early);
 				lio_diag.nearest_reject++;
 				if (points_near.size() < NUM_MATCH_POINTS)
 					lio_diag.nearest_too_few_count++;
@@ -359,10 +527,15 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 				if (plane_valid) //(planeValid)
 				{
 					float pd2 = pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3);
+					lio_diag_record_early_residual(point_index, pd2, record_early);
 					
 					if (p_body.norm() > match_s * pd2 * pd2)
 					{
-						lio_diag_record_plane_normal(V3D(pabcd(0), pabcd(1), pabcd(2)));
+						lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_ACCEPTED);
+						lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_ACCEPTED, record_early);
+						const V3D accepted_normal(pabcd(0), pabcd(1), pabcd(2));
+						lio_diag_record_plane_normal(accepted_normal);
+						lio_diag_record_accepted_measurement(pd2, accepted_normal);
 						// point_selected_surf[i] = true;
 						point_selected_surf[idx+j+1] = true;
 						normvec->points[j].x = pabcd(0);
@@ -373,11 +546,15 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 					}
 					else
 					{
+						lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_RESIDUAL_REJECT);
+						lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_RESIDUAL_REJECT, record_early);
 						lio_diag.residual_reject++;
 					}
 				}
 				else
 				{
+					lio_diag_record_retention_outcome(point_index, LIO_GEOMETRY_PLANE_REJECT);
+					lio_diag_record_early_outcome(point_index, LIO_GEOMETRY_PLANE_REJECT, record_early);
 					lio_diag.plane_reject++;
 				}  
 			}

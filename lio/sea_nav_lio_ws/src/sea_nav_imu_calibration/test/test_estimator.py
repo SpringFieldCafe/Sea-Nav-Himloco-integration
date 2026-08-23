@@ -1,5 +1,4 @@
 import csv
-import math
 import random
 
 from sea_nav_imu_calibration.estimate_calibration import estimate, load_records
@@ -15,11 +14,7 @@ FIELDS = [
 
 
 def _raw_from_transformed(values):
-    x, y, z = values
-    raw_x = math.cos(math.radians(15.1)) * x + math.sin(math.radians(15.1)) * z
-    raw_y = -y
-    raw_z = math.sin(math.radians(15.1)) * x - math.cos(math.radians(15.1)) * z
-    return raw_x, raw_y, raw_z
+    return values
 
 
 def test_estimator_recovers_cmu_formula(tmp_path):

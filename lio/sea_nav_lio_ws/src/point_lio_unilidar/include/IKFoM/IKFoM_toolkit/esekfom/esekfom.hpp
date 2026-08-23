@@ -38,6 +38,9 @@
 
 #include <vector>
 #include <cstdlib>
+#include <limits>
+#include <algorithm>
+#include <cmath>
 
 #include <boost/bind.hpp>
 #include <Eigen/Core>
@@ -183,6 +186,19 @@ public:
 		state x_propagated = x_;
 		int dof_Measurement;
 		double m_noise;
+		last_update_valid_ = false;
+		last_update_iterations_ = 0;
+		last_update_p_before_ = P_;
+		last_update_p_after_ = P_;
+		last_update_dx_.setZero();
+		last_update_k_rot_norm_ = scalar_type(0);
+		last_update_measurement_noise_ = scalar_type(0);
+		last_update_residual_abs_.clear();
+		last_update_hth_eigenvalues_.resize(0);
+		last_update_hth_.setZero();
+		last_update_hth_condition_ = std::numeric_limits<scalar_type>::quiet_NaN();
+		last_update_hth_min_eigenvalue_ = std::numeric_limits<scalar_type>::quiet_NaN();
+		last_update_hth_rank_ = 0;
 		for(int i=0; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
@@ -198,6 +214,33 @@ public:
 			// Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_v = dyn_share.h_v;
 			dof_Measurement = h_x.rows();
 			m_noise = dyn_share.M_Noise;
+			// Cache only diagnostic information from this measurement Jacobian. The
+			// filter continues to use the original H/P/K calculations below.
+			const Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> hth =
+				h_x.transpose() * h_x;
+			last_update_hth_ = hth;
+			const SelfAdjointEigenSolver<Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>>
+				hth_solver(hth);
+			last_update_hth_eigenvalues_ = hth_solver.eigenvalues();
+			if (last_update_hth_eigenvalues_.size() > 0)
+			{
+				const scalar_type max_eigenvalue = last_update_hth_eigenvalues_.maxCoeff();
+				const scalar_type rank_threshold = std::max(
+					scalar_type(1e-12) * std::abs(max_eigenvalue), scalar_type(1e-15));
+				for (Eigen::Index eigen_index = 0;
+					eigen_index < last_update_hth_eigenvalues_.size(); ++eigen_index)
+				{
+					if (last_update_hth_eigenvalues_(eigen_index) > rank_threshold)
+					{
+						last_update_hth_rank_++;
+						if (!std::isfinite(last_update_hth_min_eigenvalue_))
+							last_update_hth_min_eigenvalue_ = last_update_hth_eigenvalues_(eigen_index);
+					}
+				}
+				last_update_hth_condition_ = last_update_hth_rank_ > 0
+					? max_eigenvalue / last_update_hth_min_eigenvalue_
+					: std::numeric_limits<scalar_type>::quiet_NaN();
+			}
 			// dof_Measurement_noise = dyn_share.R.rows();
 			// vectorized_state dx, dx_new;
 			// x_.boxminus(dx, x_propagated);
@@ -218,6 +261,13 @@ public:
 				K_= PHT*HPHT.inverse();
 			}
 			Matrix<scalar_type, n, 1> dx_ = K_ * z; // - h) + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; 
+			last_update_dx_ = dx_;
+			last_update_k_rot_norm_ = K_.block(3, 0, 3, dof_Measurement).norm();
+			last_update_measurement_noise_ = static_cast<scalar_type>(m_noise);
+			last_update_residual_abs_.resize(static_cast<std::size_t>(z.rows()));
+			for (int residual_index = 0; residual_index < z.rows(); residual_index++)
+				last_update_residual_abs_[static_cast<std::size_t>(residual_index)] = std::abs(z(residual_index));
+			last_update_iterations_ = i + 1;
 			// state x_before = x_;
 
 			x_.boxplus(dx_);
@@ -284,16 +334,20 @@ public:
 				P_ = P_ - K_*h_x*P_. template block<12, n>(0, 0);
 			}
 		}
+		last_update_p_after_ = P_;
+		last_update_valid_ = true;
 		return true;
 	}
 	
 	void update_iterated_dyn_share_IMU() {
-		
+		last_imu_update_valid_ = false;
 		dyn_share_modified<scalar_type> dyn_share;
 		for(int i=0; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
 			h_dyn_share_modified_2(x_, dyn_share);
+			last_imu_innovation_ = dyn_share.z_IMU;
+			last_imu_update_valid_ = true;
 
 			Matrix<scalar_type, 6, 1> z = dyn_share.z_IMU;
 
@@ -353,10 +407,70 @@ public:
 	const cov& get_P() const {
 		return P_;
 	}
+	const cov& last_update_p_before() const {
+		return last_update_p_before_;
+	}
+	const cov& last_update_p_after() const {
+		return last_update_p_after_;
+	}
+	const vectorized_state& last_update_dx() const {
+		return last_update_dx_;
+	}
+	const std::vector<scalar_type>& last_update_residual_abs() const {
+		return last_update_residual_abs_;
+	}
+	const Eigen::Matrix<scalar_type, Eigen::Dynamic, 1>& last_update_hth_eigenvalues() const {
+		return last_update_hth_eigenvalues_;
+	}
+	const Eigen::Matrix<scalar_type, 12, 12>& last_update_hth() const {
+		return last_update_hth_;
+	}
+	scalar_type last_update_hth_condition() const {
+		return last_update_hth_condition_;
+	}
+	scalar_type last_update_hth_min_eigenvalue() const {
+		return last_update_hth_min_eigenvalue_;
+	}
+	int last_update_hth_rank() const {
+		return last_update_hth_rank_;
+	}
+	scalar_type last_update_k_rot_norm() const {
+		return last_update_k_rot_norm_;
+	}
+	scalar_type last_update_measurement_noise() const {
+		return last_update_measurement_noise_;
+	}
+	int last_update_iterations() const {
+		return last_update_iterations_;
+	}
+	bool last_update_valid() const {
+		return last_update_valid_;
+	}
+	const Matrix<scalar_type, 6, 1>& last_imu_innovation() const {
+		return last_imu_innovation_;
+	}
+	bool last_imu_update_valid() const {
+		return last_imu_update_valid_;
+	}
 	state x_;
 private:
 	measurement m_;
 	cov P_;
+	cov last_update_p_before_ = cov::Zero();
+	cov last_update_p_after_ = cov::Zero();
+	vectorized_state last_update_dx_ = vectorized_state::Zero();
+	std::vector<scalar_type> last_update_residual_abs_;
+	Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> last_update_hth_eigenvalues_;
+	Eigen::Matrix<scalar_type, 12, 12> last_update_hth_ = Eigen::Matrix<scalar_type, 12, 12>::Zero();
+	scalar_type last_update_hth_condition_ = std::numeric_limits<scalar_type>::quiet_NaN();
+	scalar_type last_update_hth_min_eigenvalue_ = std::numeric_limits<scalar_type>::quiet_NaN();
+	int last_update_hth_rank_ = 0;
+	scalar_type last_update_k_rot_norm_ = scalar_type(0);
+	scalar_type last_update_measurement_noise_ = scalar_type(0);
+	int last_update_iterations_ = 0;
+	bool last_update_valid_ = false;
+	Matrix<scalar_type, 6, 1> last_imu_innovation_ = Matrix<scalar_type, 6, 1>::Zero();
+	bool last_imu_update_valid_ = false;
 	spMt l_;
 	spMt f_x_1;
 	spMt f_x_2;

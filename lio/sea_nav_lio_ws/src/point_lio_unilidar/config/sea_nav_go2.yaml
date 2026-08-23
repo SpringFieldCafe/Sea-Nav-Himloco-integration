@@ -42,9 +42,11 @@
             match_s: 81.0
             fov_degree: 180.0
             det_range: 100.0
-            gravity_align: false
-            gravity: [0.0, 0.0, 0.0]
-            gravity_init: [0.0, 0.0, 0.0]
+            gravity_align: true
+            gravity: [0.0, 0.0, -9.810]
+            gravity_init: [0.0, 0.0, -9.810]
+            # Point-LIO's p_imu = R_LI * p_lidar + T_LI convention.
+            # Official UniLiDAR L1 values for this convention.
             extrinsic_T: [0.007698, 0.014655, -0.00667]
             extrinsic_R: [1.0, 0.0, 0.0,
                           0.0, 1.0, 0.0,

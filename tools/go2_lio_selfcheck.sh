@@ -238,7 +238,7 @@ PY
 }
 
 check_transformed_raw_imu() {
-  check_imu_stream /sea_nav/lio/transformed_raw_imu TRANSFORMED_RAW_IMU body
+  check_imu_stream /sea_nav/lio/transformed_raw_imu TRANSFORMED_RAW_IMU utlidar_imu
   say "TRANSFORMED_RAW_IMU=PASS"
 }
 

@@ -6,7 +6,7 @@ import os
 import sys
 
 
-THETA = math.radians(15.1)
+FRAME_CONTRACT = 'unilidar_native_sensor_v1'
 REQUIRED_FIELDS = {
     'receive_monotonic_time',
     'angular_velocity_x',
@@ -26,19 +26,12 @@ def _finite(value, name):
 
 
 def _transform(row):
-    x = _finite(row['angular_velocity_x'], 'angular_velocity_x')
-    y = -_finite(row['angular_velocity_y'], 'angular_velocity_y')
-    z = -_finite(row['angular_velocity_z'], 'angular_velocity_z')
-    angular_x = x * math.cos(THETA) - z * math.sin(THETA)
-    angular_y = y
-    angular_z = x * math.sin(THETA) + z * math.cos(THETA)
-
-    acc_x = _finite(row['linear_acceleration_x'], 'linear_acceleration_x')
-    acc_y = -_finite(row['linear_acceleration_y'], 'linear_acceleration_y')
-    acc_z = -_finite(row['linear_acceleration_z'], 'linear_acceleration_z')
-    linear_x = acc_x * math.cos(THETA) - acc_z * math.sin(THETA)
-    linear_y = acc_y
-    linear_z = acc_x * math.sin(THETA) + acc_z * math.cos(THETA)
+    angular_x = _finite(row['angular_velocity_x'], 'angular_velocity_x')
+    angular_y = _finite(row['angular_velocity_y'], 'angular_velocity_y')
+    angular_z = _finite(row['angular_velocity_z'], 'angular_velocity_z')
+    linear_x = _finite(row['linear_acceleration_x'], 'linear_acceleration_x')
+    linear_y = _finite(row['linear_acceleration_y'], 'linear_acceleration_y')
+    linear_z = _finite(row['linear_acceleration_z'], 'linear_acceleration_z')
     return {
         'time': _finite(row['receive_monotonic_time'], 'receive_monotonic_time'),
         'angular': (angular_x, angular_y, angular_z),
@@ -138,6 +131,7 @@ def _write_yaml(path, result, force):
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     values = {
+        'frame_contract': FRAME_CONTRACT,
         'acc_bias_x': result['acc_bias'][0],
         'acc_bias_y': result['acc_bias'][1],
         'acc_bias_z': result['acc_bias'][2],
