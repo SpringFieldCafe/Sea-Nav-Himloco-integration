@@ -333,11 +333,10 @@ start_navigation() {
     --navigation-vy-max "$NAV_VY_MAX"
     --goal-tolerance "$GOAL_TOLERANCE"
     --navigation-log "$RUN_ROOT/navigation.log"
-    --enable-motion
   )
   [[ -n "$GOAL_X" ]] && args+=(--goal-x "$GOAL_X" --goal-y "$GOAL_Y")
   ((ASSUME_CLEAR_LIDAR)) && args+=(--assume-clear-lidar)
-  ((ENABLE_OFFICIAL_MOTION)) || args=("${args[@]/--enable-motion}")
+  ((ENABLE_OFFICIAL_MOTION)) && args+=(--enable-motion)
   say_red "[START] SEA-Nav navigation + Unitree official Sport/MPC"
   if ((ENABLE_OFFICIAL_MOTION)); then
     say_red "WAIT_FOR_POSE_ARM: type START only after the robot is clear and already safely standing"
@@ -352,7 +351,10 @@ start_navigation() {
 
 record_exit_reason() {
   [[ -f "$RUN_ROOT/himloco.log" ]] || return 0
-  if grep -Fq '[safety] B' "$RUN_ROOT/himloco.log"; then
+  if grep -Eq 'error:|Traceback \(most recent call last\)' "$RUN_ROOT/himloco.log"; then
+    EXIT_REASON=PROCESS_ERROR
+    NAVIGATION_STATUS=FAIL
+  elif grep -Fq '[safety] B' "$RUN_ROOT/himloco.log"; then
     EXIT_REASON=B_ESTOP
   elif grep -Fq '[safety] Ctrl+C' "$RUN_ROOT/himloco.log"; then
     EXIT_REASON=CTRL_C
@@ -411,7 +413,7 @@ write_summary() {
     [[ -f "$LOG_ROOT/motion_metrics.log" ]] && cat "$LOG_ROOT/motion_metrics.log" || printf 'MOTION_ODOM=NOT_AVAILABLE\n'
     printf 'NAVIGATION_STATUS=%s\nMOTION_STATUS=%s\n' "$NAVIGATION_STATUS" "$MOTION_STATUS"
     printf 'EXIT_REASON=%s\n' "$EXIT_REASON"
-    if [[ "$CPU_STATUS" == PASS && "$MCF_STATUS" == PASS && "$RAW_SENSOR_STATUS" == PASS && "$TRANSFORM_STATUS" == PASS && "$DESKEW_STATUS" == PASS && "$POINT_LIO_STATUS" == PASS && "$NAVIGATION_STATUS" != NOT_STARTED ]]; then
+    if [[ "$CPU_STATUS" == PASS && "$MCF_STATUS" == PASS && "$RAW_SENSOR_STATUS" == PASS && "$TRANSFORM_STATUS" == PASS && "$DESKEW_STATUS" == PASS && "$POINT_LIO_STATUS" == PASS && "$NAVIGATION_STATUS" != NOT_STARTED && "$NAVIGATION_STATUS" != FAIL ]]; then
       printf 'RESULT=PASS\n'
     else
       printf 'RESULT=FAIL\n'
