@@ -23,6 +23,8 @@ NAV_METADATA="$ROOT/artifacts/go2_onboard/sea_nav_policy_peer_model_2000.json"
 GOAL_X=""
 GOAL_Y=""
 FRONT_GOAL_DISTANCE=""
+FRONT_GOAL_FORWARD=""
+FRONT_GOAL_LEFT=""
 NAV_VX_MAX=inf
 NAV_VY_MAX=0
 FIXED_SPORT_VX=""
@@ -257,6 +259,7 @@ start_sensor_bridge() {
   )
   [[ -n "$GOAL_X" ]] && args+=(--goal-x "$GOAL_X" --goal-y "$GOAL_Y")
   [[ -n "$FRONT_GOAL_DISTANCE" ]] && args+=(--front-goal-distance "$FRONT_GOAL_DISTANCE")
+  [[ -n "$FRONT_GOAL_FORWARD" ]] && args+=(--front-goal-forward "$FRONT_GOAL_FORWARD" --front-goal-left "$FRONT_GOAL_LEFT")
   "${args[@]}" >"$LOG_ROOT/sensor_bridge.log" 2>&1 &
   write_pid sensor_bridge "$!"
   sleep 2
@@ -462,6 +465,8 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --goal-x VALUE             world-frame goal x
   --goal-y VALUE             world-frame goal y
   --front-goal-distance M    fix a goal M meters ahead of first odom pose
+  --front-goal-forward M     fix a goal M meters forward from first pose
+  --front-goal-left M        fix a goal M meters left from first pose
   --navigation-vx-max VALUE  forward speed limit, default inf (disabled)
   --navigation-vy-max VALUE  lateral speed limit, default 0
   --fixed-sport-vx VALUE      diagnostic fixed SportClient command, no speed cap
@@ -484,6 +489,8 @@ main() {
       --goal-x) (($# >= 2)) || die "--goal-x requires a value"; GOAL_X="$2"; shift 2 ;;
       --goal-y) (($# >= 2)) || die "--goal-y requires a value"; GOAL_Y="$2"; shift 2 ;;
       --front-goal-distance) (($# >= 2)) || die "--front-goal-distance requires a value"; FRONT_GOAL_DISTANCE="$2"; shift 2 ;;
+      --front-goal-forward) (($# >= 2)) || die "--front-goal-forward requires a value"; FRONT_GOAL_FORWARD="$2"; shift 2 ;;
+      --front-goal-left) (($# >= 2)) || die "--front-goal-left requires a value"; FRONT_GOAL_LEFT="$2"; shift 2 ;;
       --navigation-vx-max) (($# >= 2)) || die "--navigation-vx-max requires a value"; NAV_VX_MAX="$2"; shift 2 ;;
       --navigation-vy-max) (($# >= 2)) || die "--navigation-vy-max requires a value"; NAV_VY_MAX="$2"; shift 2 ;;
       --fixed-sport-vx) (($# >= 2)) || die "--fixed-sport-vx requires a value"; FIXED_SPORT_VX="$2"; shift 2 ;;
@@ -494,8 +501,10 @@ main() {
       *) die "unknown argument: $1" ;;
     esac
   done
-  if [[ -n "$FRONT_GOAL_DISTANCE" ]]; then
-    [[ -z "$GOAL_X" && -z "$GOAL_Y" ]] || die "front-goal-distance cannot be combined with goal-x/goal-y"
+  if [[ -n "$FRONT_GOAL_DISTANCE" || -n "$FRONT_GOAL_FORWARD" || -n "$FRONT_GOAL_LEFT" ]]; then
+    [[ -z "$GOAL_X" && -z "$GOAL_Y" ]] || die "front goal cannot be combined with goal-x/goal-y"
+    [[ -z "$FRONT_GOAL_DISTANCE" || ( -z "$FRONT_GOAL_FORWARD" && -z "$FRONT_GOAL_LEFT" ) ]] || die "front goal distance cannot be combined with offsets"
+    [[ -n "$FRONT_GOAL_FORWARD" && -n "$FRONT_GOAL_LEFT" ]] || die "front-goal-forward and --front-goal-left must be used together"
   else
     [[ -n "$GOAL_X" && -n "$GOAL_Y" ]] || die "provide --goal-x/--goal-y or --front-goal-distance"
   fi

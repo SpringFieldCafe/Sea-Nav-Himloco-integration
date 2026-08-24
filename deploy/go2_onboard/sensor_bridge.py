@@ -74,10 +74,19 @@ class SensorBridge:
                 self.freshness[name] = float(value)
         self.reader = RosStateReader(Topics(args), max_sensor_age=max(self.freshness.values()))
         self.goal_manager = GoalManager()
-        if args.front_goal_distance is not None and (args.goal_x is not None or args.goal_y is not None):
-            raise ValueError("front goal distance cannot be combined with goal-x/goal-y")
+        has_offset_goal = args.front_goal_forward is not None or args.front_goal_left is not None
+        if args.front_goal_distance is not None and has_offset_goal:
+            raise ValueError("front goal distance cannot be combined with front goal offsets")
+        if has_offset_goal and (args.front_goal_forward is None or args.front_goal_left is None):
+            raise ValueError("front goal offsets require both forward and left values")
+        if (args.front_goal_distance is not None or has_offset_goal) and (args.goal_x is not None or args.goal_y is not None):
+            raise ValueError("front goal cannot be combined with goal-x/goal-y")
         if args.front_goal_distance is not None and args.front_goal_distance <= 0.0:
             raise ValueError("front goal distance must be positive")
+        if has_offset_goal and not all(np.isfinite(value) for value in (args.front_goal_forward, args.front_goal_left)):
+            raise ValueError("front goal offsets must be finite")
+        if has_offset_goal and args.front_goal_forward == 0.0 and args.front_goal_left == 0.0:
+            raise ValueError("front goal offsets cannot both be zero")
         if args.front_goal_distance is None and args.goal_x is not None and args.goal_y is not None:
             self.goal_manager.update(Goal2D(args.goal_frame, args.goal_x, args.goal_y, time.time()))
         self.sequence = 0
@@ -155,20 +164,28 @@ class SensorBridge:
         if (
             goal is None
             and odom_ready
-            and self.args.front_goal_distance is not None
+            and (
+                self.args.front_goal_distance is not None
+                or self.args.front_goal_forward is not None
+            )
         ):
-            distance = float(self.args.front_goal_distance)
+            forward = float(
+                self.args.front_goal_distance
+                if self.args.front_goal_distance is not None
+                else self.args.front_goal_forward
+            )
+            left = 0.0 if self.args.front_goal_distance is not None else float(self.args.front_goal_left)
             front_goal = Goal2D(
                 odom_frame,
-                float(position[0] + distance * np.cos(yaw)),
-                float(position[1] + distance * np.sin(yaw)),
+                float(position[0] + forward * np.cos(yaw) - left * np.sin(yaw)),
+                float(position[1] + forward * np.sin(yaw) + left * np.cos(yaw)),
                 time.time(),
             )
             self.goal_manager.update(front_goal)
             goal = front_goal
             print(
                 "[goal] FRONT_GOAL_FIXED "
-                f"distance={distance:.3f} "
+                f"forward={forward:.3f} left={left:.3f} "
                 f"world=[{front_goal.x:.6f},{front_goal.y:.6f}] "
                 f"yaw={yaw:.6f} frame={odom_frame}"
             )
@@ -434,6 +451,14 @@ def build_parser():
         "--front-goal-distance", type=float,
         help="fix a goal this far in front of the first valid odom pose",
     )
+    parser.add_argument(
+        "--front-goal-forward", type=float,
+        help="fix a goal this far forward from the first valid odom pose",
+    )
+    parser.add_argument(
+        "--front-goal-left", type=float,
+        help="fix a goal this far left from the first valid odom pose",
+    )
     parser.set_defaults(period=1.0 / 50.0)
     return parser
 
@@ -442,8 +467,13 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if (args.goal_x is None) != (args.goal_y is None):
         raise SystemExit("provide both --goal-x and --goal-y, or neither")
-    if args.front_goal_distance is not None and (args.goal_x is not None or args.goal_y is not None):
-        raise SystemExit("front-goal-distance cannot be combined with goal-x/goal-y")
+    has_offset_goal = args.front_goal_forward is not None or args.front_goal_left is not None
+    if args.front_goal_distance is not None and has_offset_goal:
+        raise SystemExit("front goal distance cannot be combined with front goal offsets")
+    if has_offset_goal and (args.front_goal_forward is None or args.front_goal_left is None):
+        raise SystemExit("front goal offsets require both forward and left values")
+    if (args.front_goal_distance is not None or has_offset_goal) and (args.goal_x is not None or args.goal_y is not None):
+        raise SystemExit("front goal cannot be combined with goal-x/goal-y")
     args.period = 1.0 / args.control_hz
     run(args)
 
