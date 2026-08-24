@@ -17,6 +17,7 @@ class Repuber(Node):
     # message contract and applies calibration in the native sensor axes.
     FRAME_CONTRACT = 'unilidar_native_sensor_v1'
     RAW_CLOUD_FRAME = 'utlidar_lidar'
+    BASE_CLOUD_FRAME = 'base_link'
     RAW_IMU_FRAME = 'utlidar_imu'
 
     def __init__(self):
@@ -29,6 +30,7 @@ class Repuber(Node):
         self.imu_raw_pub = self.create_publisher(Imu, '/utlidar/transformed_raw_imu', 50)
         self.imu_pub = self.create_publisher(Imu, '/utlidar/transformed_imu', 50)
         self.cloud_pub = self.create_publisher(PointCloud2, '/utlidar/transformed_cloud', 50)
+        self.cloud_base_pub = self.create_publisher(PointCloud2, '/utlidar/cloud_base', 50)
 
         self.imu_stationary_list = []
         
@@ -147,6 +149,20 @@ class Repuber(Node):
         elevated_cloud.is_dense = data.is_dense
 
         self.cloud_pub.publish(elevated_cloud)
+
+        # The native cloud remains the Point-LIO input.  This separate output
+        # is the SEA-Nav body-frame contract: x-forward, y-left, z-up.
+        base_points = [list(point) for point in transformed_points]
+        for point in base_points:
+            base_xyz = (np.asarray(point[0:3], dtype=np.float64) @
+                        self.base_from_lidar_rotation.T +
+                        self.base_from_lidar_translation)
+            point[0], point[1], point[2] = base_xyz.tolist()
+        cloud_base = pc2.create_cloud(data.header, data.fields, base_points)
+        cloud_base.header.stamp = elevated_cloud.header.stamp
+        cloud_base.header.frame_id = self.BASE_CLOUD_FRAME
+        cloud_base.is_dense = data.is_dense
+        self.cloud_base_pub.publish(cloud_base)
             
     def imu_callback(self, data):    
         angular = self.sensor_rotation @ np.array([

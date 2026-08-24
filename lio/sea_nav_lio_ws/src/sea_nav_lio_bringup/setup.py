@@ -11,6 +11,9 @@ setup(
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/point_lio_go2.launch.py']),
+        ('share/' + package_name, [
+            '../../../../tools/ros2_lidar_deskew/deskew_node.py',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

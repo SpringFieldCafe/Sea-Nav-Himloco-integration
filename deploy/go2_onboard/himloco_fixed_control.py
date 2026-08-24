@@ -338,6 +338,8 @@ class FixedHIMLocoController:
         self.snapshot_lock = threading.RLock()
         self.watchdog = LowStateWatchdog(args.max_sensor_age)
         self.sent_any_command = False
+        self.lowcmd_publish_count = 0
+        self.active_lowcmd_publish_count = 0
         self.policy = None
         self.him_obs = HIMLocoObservation(torch.device("cpu"))
         self.previous_action = np.zeros(12, dtype=np.float32)
@@ -606,6 +608,9 @@ class FixedHIMLocoController:
         write_start = time.monotonic()
         self._record_event("write_start", write_start_monotonic=write_start)
         self.publisher.Write(command)
+        self.lowcmd_publish_count += 1
+        if self.state == RuntimeState.ACTIVE:
+            self.active_lowcmd_publish_count += 1
         write_end = time.monotonic()
         self._record_event(
             "write_end",
@@ -964,6 +969,7 @@ class FixedHIMLocoController:
         self.control_periods.clear()
         self.deadline_lateness.clear()
         self.deadline_miss_count = 0
+        self.active_lowcmd_publish_count = 0
 
     def run(self):
         pose_snapshot = self._wait_for_pose_arm()

@@ -50,6 +50,7 @@ HIM_1460_SHA256 = "cab2489dda7732a7d6f51595aa6362384445c738537d0c1c91569054c7b9f
 NAV_LOWER = np.asarray([0.0, 0.0, -0.15], dtype=np.float32)
 NAV_UPPER = np.asarray([0.15, 0.0, 0.15], dtype=np.float32)
 NAV_VX_MAX = 0.15
+NAV_VY_MAX = 0.15
 
 
 def sha256_file(path: str) -> str:
@@ -82,17 +83,25 @@ def validate_navigation_himloco_policy(path: str, allow_override: bool = False) 
 
 
 class NavigationLimiter:
-    """Explicit first-milestone limiter: forward arc only, no lateral vy."""
+    """Limit navigation velocity commands for an explicit test profile."""
 
-    def __init__(self, filter_alpha: float = 0.15, vx_max: float = NAV_VX_MAX):
+    def __init__(self, filter_alpha: float = 0.15, vx_max: float = NAV_VX_MAX,
+                 vy_max: float = 0.0):
         vx_max = float(vx_max)
+        vy_max = float(vy_max)
         if not np.isfinite(vx_max) or not 0.0 <= vx_max <= NAV_VX_MAX:
             raise ValueError(f"navigation vx max must be in [0,{NAV_VX_MAX}]")
+        if not np.isfinite(vy_max) or not 0.0 <= vy_max <= NAV_VY_MAX:
+            raise ValueError(f"navigation vy max must be in [0,{NAV_VY_MAX}]")
         upper = NAV_UPPER.copy()
         upper[0] = vx_max
+        lower = NAV_LOWER.copy()
+        lower[1] = -vy_max
+        upper[1] = vy_max
         self.vx_max = vx_max
-        self.bridge = ReadOnlyCommandBridge(NAV_LOWER, upper, filter_alpha)
-        self.lower = NAV_LOWER.copy()
+        self.vy_max = vy_max
+        self.bridge = ReadOnlyCommandBridge(lower, upper, filter_alpha)
+        self.lower = lower
         self.upper = upper
 
     def reset(self):
@@ -103,9 +112,7 @@ class NavigationLimiter:
         if raw.shape != (3,) or not np.isfinite(raw).all():
             raise FloatingPointError("SEA-Nav command must be a finite 3-vector")
         limited = np.clip(raw, self.lower, self.upper)
-        limited[1] = 0.0
         safe = self.bridge.filter(limited)
-        safe[1] = 0.0
         return raw.copy(), limited, safe
 
 
@@ -131,7 +138,10 @@ def _navigation_arg(args, name):
     return args.get(name) if isinstance(args, dict) else getattr(args, name)
 
 
-def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, reached):
+def _navigation_result(
+    packet, sea, nav_obs, limiter, previous_command, args, reached,
+    goal_reached_streak=0,
+):
     source_metadata = {
         "sensor_sequence": int(packet.get("sequence", -1)),
         "sensor_timestamp_monotonic": float(packet.get("timestamp_monotonic", 0.0)),
@@ -145,7 +155,14 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
     })
     goal_body = np.asarray(packet.get("goal_body", [0.0, 0.0]), dtype=np.float32)
     distance = float(np.linalg.norm(goal_body))
-    if reached or (fresh and goal_is_reached(goal_body, _navigation_arg(args, "goal_tolerance"))):
+    goal_candidate = fresh and goal_is_reached(
+        goal_body, _navigation_arg(args, "goal_tolerance")
+    )
+    confirmations = int(_navigation_arg(args, "goal_reached_confirmations"))
+    if confirmations < 1:
+        raise ValueError("goal_reached_confirmations must be positive")
+    goal_reached_streak = goal_reached_streak + 1 if goal_candidate else 0
+    if reached or goal_reached_streak >= confirmations:
         return {
             **source_metadata,
             "command": [0.0, 0.0, 0.0],
@@ -160,7 +177,7 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
             "sequence": int(packet["sequence"]),
             "timestamp_monotonic": time.monotonic(),
             "lowcmd_sent": False,
-        }, True
+        }, True, goal_reached_streak
     if not fresh:
         nav_obs.reset()
         limiter.reset()
@@ -178,7 +195,7 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
             "sequence": int(packet["sequence"]),
             "timestamp_monotonic": time.monotonic(),
             "lowcmd_sent": False,
-        }, reached
+        }, False, 0
 
     device = torch.device("cpu")
     packet_tensor = {
@@ -224,7 +241,7 @@ def _navigation_result(packet, sea, nav_obs, limiter, previous_command, args, re
         "sequence": int(packet["sequence"]),
         "timestamp_monotonic": time.monotonic(),
         "lowcmd_sent": False,
-    }, reached
+    }, False, goal_reached_streak
 
 
 def _navigation_worker_main(config, sender, stop_event):
@@ -242,10 +259,12 @@ def _navigation_worker_main(config, sender, stop_event):
             raise SafetyError("SEA-Nav worker hash mismatch")
         nav_obs = NavigationObservation(torch.device("cpu"))
         limiter = NavigationLimiter(
-            config["command_filter_alpha"], config["navigation_vx_max"]
+            config["command_filter_alpha"], config["navigation_vx_max"],
+            config["navigation_vy_max"],
         )
         previous_command = np.zeros(3, dtype=np.float32)
         reached = False
+        goal_reached_streak = 0
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(float(config["connect_timeout"]))
         sock.connect(config["sensor_socket"])
@@ -274,8 +293,9 @@ def _navigation_worker_main(config, sender, stop_event):
             now = time.monotonic()
             if latest_packet is None or now < next_inference:
                 continue
-            result, reached = _navigation_result(
-                latest_packet, sea, nav_obs, limiter, previous_command, config, reached
+            result, reached, goal_reached_streak = _navigation_result(
+                latest_packet, sea, nav_obs, limiter, previous_command, config, reached,
+                goal_reached_streak,
             )
             previous_command = np.asarray(result["command"], dtype=np.float32)
             result["worker_send_timestamp_monotonic"] = time.monotonic()
@@ -506,6 +526,9 @@ class SeaNavHimLocoController(FixedHIMLocoController):
     def __init__(self, args, navigation):
         super().__init__(args)
         self.navigation = navigation
+        self.last_navigation_command = np.zeros(3, dtype=np.float32)
+        self.last_navigation_command_age_s = float("inf")
+        self.last_navigation_action_norm = 0.0
         self._last_navigation_summary = 0.0
         self._last_navigation_fault = None
 
@@ -560,11 +583,22 @@ class SeaNavHimLocoController(FixedHIMLocoController):
         return True
 
     def _run_policy_once(self, _command, snapshot, observation=None):
-        return super()._run_policy_once(
-            self._current_navigation_command(),
+        navigation_command = self._current_navigation_command()
+        self.last_navigation_command = navigation_command.as_array().copy()
+        with self.navigation.mailbox.lock:
+            result = dict(self.navigation.mailbox.last_result)
+        sent_at = result.get("timestamp_monotonic")
+        self.last_navigation_command_age_s = (
+            max(0.0, time.monotonic() - float(sent_at))
+            if sent_at is not None else float("inf")
+        )
+        action = super()._run_policy_once(
+            navigation_command,
             snapshot,
             observation=observation,
         )
+        self.last_navigation_action_norm = float(np.linalg.norm(action))
+        return action
 
     def _print_diagnostics(self, now):
         super()._print_diagnostics(now)
@@ -586,6 +620,14 @@ class SeaNavHimLocoController(FixedHIMLocoController):
                 },
                 separators=(",", ":"),
             )
+        )
+        print(
+            "[navigation-control] "
+            f"command={self.last_navigation_command.tolist()} "
+            f"command_age_s={self.last_navigation_command_age_s:.4f} "
+            f"action_norm={self.last_navigation_action_norm:.4f} "
+            f"lowcmd_publish_count={self.lowcmd_publish_count} "
+            f"active_lowcmd_publish_count={self.active_lowcmd_publish_count}"
         )
 
     def stop(self):
@@ -610,6 +652,12 @@ def build_parser():
         default=NAV_VX_MAX,
         help="navigation forward-vx safety upper bound in m/s; maximum 0.15",
     )
+    parser.add_argument(
+        "--navigation-vy-max",
+        type=float,
+        default=0.0,
+        help="optional lateral-vy safety bound in m/s; default 0",
+    )
     parser.add_argument("--navigation-connect-timeout", type=float, default=10.0)
     parser.add_argument("--navigation-summary-interval", type=float, default=1.0)
     parser.add_argument("--assume-clear-lidar", action="store_true",
@@ -620,9 +668,11 @@ def build_parser():
         help="explicit test mode: allow non-1460 HIMLoco policies after the 270->12 contract gate",
     )
     parser.add_argument("--navigation-log", default=DEFAULT_NAVIGATION_LOG)
-    parser.add_argument("--goal-x", type=float, required=True)
-    parser.add_argument("--goal-y", type=float, required=True)
-    parser.add_argument("--goal-tolerance", type=float, default=0.30)
+    parser.add_argument("--goal-x", type=float)
+    parser.add_argument("--goal-y", type=float)
+    parser.add_argument("--front-goal-distance", type=float)
+    parser.add_argument("--goal-tolerance", type=float, default=0.15)
+    parser.add_argument("--goal-reached-confirmations", type=int, default=5)
     return parser
 
 
@@ -632,10 +682,18 @@ def main(argv=None):
         raise SystemExit("SEA-Nav navigation only supports the HIMLoco 1460 active profile")
     if not 0.0 < args.navigation_hz <= 20.0:
         raise SystemExit("--navigation-hz must be in (0,20]")
+    if (args.goal_x is None) != (args.goal_y is None):
+        raise SystemExit("provide both --goal-x and --goal-y, or neither")
+    if args.front_goal_distance is not None and (args.goal_x is not None or args.goal_y is not None):
+        raise SystemExit("front-goal-distance cannot be combined with goal-x/goal-y")
     if args.navigation_command_max_age <= 0.0 or args.goal_tolerance <= 0.0:
         raise SystemExit("navigation freshness and goal tolerance must be positive")
+    if args.goal_reached_confirmations < 1:
+        raise SystemExit("--goal-reached-confirmations must be positive")
     if not np.isfinite(args.navigation_vx_max) or not 0.0 <= args.navigation_vx_max <= NAV_VX_MAX:
         raise SystemExit(f"--navigation-vx-max must be in [0,{NAV_VX_MAX}]")
+    if not np.isfinite(args.navigation_vy_max) or not 0.0 <= args.navigation_vy_max <= NAV_VY_MAX:
+        raise SystemExit(f"--navigation-vy-max must be in [0,{NAV_VY_MAX}]")
     # The fixed controller parser is reused for its transport/safety options.
     # Navigation owns the command source; non-zero fixed commands are rejected
     # instead of silently becoming a second command path.
@@ -649,11 +707,19 @@ def main(argv=None):
     )
     if args.allow_policy_override:
         print(f"[safety] HIMLOCO_POLICY_OVERRIDE=ENABLED sha256={himloco_sha}")
-    print(f"[navigation] GOAL_WORLD=[{args.goal_x:.6f},{args.goal_y:.6f}] frame=odom")
+    if args.front_goal_distance is not None:
+        print(f"[navigation] FRONT_GOAL_DISTANCE={args.front_goal_distance:.6f}m frame=odom")
+    else:
+        print(f"[navigation] GOAL_WORLD=[{args.goal_x:.6f},{args.goal_y:.6f}] frame=odom")
     print(f"[navigation] GOAL_TOLERANCE={args.goal_tolerance:.3f}m")
     print(
+        f"[navigation] GOAL_REACHED_CONFIRMATIONS={args.goal_reached_confirmations}"
+    )
+    print(
         "[safety] NAVIGATION_SAFETY_PROFILE "
-        f"vx=[0,{args.navigation_vx_max:.6f}] vy=0 wz=[-0.15,+0.15]"
+        f"vx=[0,{args.navigation_vx_max:.6f}] "
+        f"vy=[-{args.navigation_vy_max:.6f},+{args.navigation_vy_max:.6f}] "
+        "wz=[-0.15,+0.15]"
     )
 
     mailbox = NavigationMailbox(args.navigation_command_max_age)
@@ -665,10 +731,12 @@ def main(argv=None):
         "navigation_command_max_age": args.navigation_command_max_age,
         "command_filter_alpha": args.navigation_filter_alpha,
         "navigation_vx_max": args.navigation_vx_max,
+        "navigation_vy_max": args.navigation_vy_max,
         "connect_timeout": args.navigation_connect_timeout,
         "summary_interval": args.navigation_summary_interval,
         "navigation_log": args.navigation_log,
         "goal_tolerance": args.goal_tolerance,
+        "goal_reached_confirmations": args.goal_reached_confirmations,
         "lowstate_max_age": args.max_sensor_age,
         "odom_max_age": 0.10,
         "lidar_max_age": 0.20,

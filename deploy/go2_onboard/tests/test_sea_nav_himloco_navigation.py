@@ -4,6 +4,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
+
+import deploy.go2_onboard.sea_nav_himloco_navigation as navigation_module
 
 from deploy.go2_onboard.sea_nav_himloco_navigation import (
     HIM_1460_SHA256,
@@ -52,6 +55,14 @@ def test_navigation_vx_max_is_a_limiter_bound_not_a_fixed_command():
     np.testing.assert_allclose(safe, [0.05, 0.0, 0.0])
 
 
+def test_navigation_vy_can_be_explicitly_enabled_for_2d_experiment():
+    limiter = NavigationLimiter(filter_alpha=1.0, vx_max=0.1, vy_max=0.1)
+    raw, limited, safe = limiter.apply([0.1, 0.2, 0.0])
+    np.testing.assert_allclose(raw, [0.1, 0.2, 0.0])
+    np.testing.assert_allclose(limited, [0.1, 0.1, 0.0])
+    np.testing.assert_allclose(safe, [0.1, 0.1, 0.0])
+
+
 def test_navigation_vx_max_cannot_exceed_global_safety_limit():
     with pytest.raises(ValueError, match="navigation vx max"):
         NavigationLimiter(vx_max=0.150001)
@@ -73,11 +84,61 @@ def test_navigation_worker_config_dict_reaches_freshness_gate():
         "goal_tolerance": 0.30,
     }
     resettable = SimpleNamespace(reset=lambda: None)
-    result, reached = _navigation_result(
+    config["goal_reached_confirmations"] = 5
+    result, reached, streak = _navigation_result(
         packet, None, resettable, resettable, np.zeros(3), config, False
     )
     assert result["runtime_state"] == "STALE_NAVIGATION"
     assert reached is False
+    assert streak == 0
+
+
+def test_goal_reached_requires_consecutive_fresh_confirmations(monkeypatch):
+    monkeypatch.setattr(
+        navigation_module,
+        "infer",
+        lambda sea, observation, output_dim: torch.zeros((1, 3), dtype=torch.float32),
+    )
+    packet = {
+        "sequence": 1,
+        "timestamp_monotonic": time.monotonic(),
+        "validity": {"lowstate": True, "lidar": True, "odom": True, "goal": True},
+        "sensor_age": {"lowstate": 0.01, "lidar": 0.01, "odom": 0.01},
+        "goal_body": [0.10, 0.0],
+        "projected_gravity": [0.0, 0.0, -9.81],
+        "base_linear_velocity_body": [0.0, 0.0, 0.0],
+        "base_angular_velocity_body": [0.0, 0.0, 0.0],
+        "lidar_rays": [5.0] * 5,
+    }
+    config = {
+        "assume_clear_lidar": True,
+        "lowstate_max_age": 0.10,
+        "odom_max_age": 0.10,
+        "lidar_max_age": 0.20,
+        "goal_tolerance": 0.15,
+        "goal_reached_confirmations": 3,
+        "navigation_vx_max": 0.15,
+        "navigation_vy_max": 0.0,
+    }
+    resettable = SimpleNamespace(
+        reset=lambda: None,
+        build=lambda *args: torch.zeros((1, 550), dtype=torch.float32),
+    )
+    streak = 0
+    reached = False
+    for index in range(2):
+        packet["sequence"] = index
+        result, reached, streak = _navigation_result(
+            packet, None, resettable, resettable, np.zeros(3), config, reached, streak
+        )
+        assert result["runtime_state"] == "NAVIGATION"
+        assert reached is False
+    result, reached, streak = _navigation_result(
+        packet, None, resettable, resettable, np.zeros(3), config, reached, streak
+    )
+    assert result["runtime_state"] == "GOAL_REACHED"
+    assert reached is True
+    assert streak == 3
 
 
 def test_navigation_limiter_rejects_nonfinite_output():

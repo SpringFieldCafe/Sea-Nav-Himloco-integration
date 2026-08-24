@@ -74,7 +74,11 @@ class SensorBridge:
                 self.freshness[name] = float(value)
         self.reader = RosStateReader(Topics(args), max_sensor_age=max(self.freshness.values()))
         self.goal_manager = GoalManager()
-        if args.goal_x is not None and args.goal_y is not None:
+        if args.front_goal_distance is not None and (args.goal_x is not None or args.goal_y is not None):
+            raise ValueError("front goal distance cannot be combined with goal-x/goal-y")
+        if args.front_goal_distance is not None and args.front_goal_distance <= 0.0:
+            raise ValueError("front goal distance must be positive")
+        if args.front_goal_distance is None and args.goal_x is not None and args.goal_y is not None:
             self.goal_manager.update(Goal2D(args.goal_frame, args.goal_x, args.goal_y, time.time()))
         self.sequence = 0
         self._printed_first_snapshot = False
@@ -148,6 +152,26 @@ class SensorBridge:
             position = odom.position[:2]
             yaw = quat_to_yaw(low_quaternion)
             odom_frame = self._odom_frame(odom, latest_odom_frame)
+        if (
+            goal is None
+            and odom_ready
+            and self.args.front_goal_distance is not None
+        ):
+            distance = float(self.args.front_goal_distance)
+            front_goal = Goal2D(
+                odom_frame,
+                float(position[0] + distance * np.cos(yaw)),
+                float(position[1] + distance * np.sin(yaw)),
+                time.time(),
+            )
+            self.goal_manager.update(front_goal)
+            goal = front_goal
+            print(
+                "[goal] FRONT_GOAL_FIXED "
+                f"distance={distance:.3f} "
+                f"world=[{front_goal.x:.6f},{front_goal.y:.6f}] "
+                f"yaw={yaw:.6f} frame={odom_frame}"
+            )
         current_goal = self.goal_manager.current
         if not self._printed_first_snapshot and odom_ready:
             print(
@@ -406,6 +430,10 @@ def build_parser():
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--goal-x", type=float)
     parser.add_argument("--goal-y", type=float)
+    parser.add_argument(
+        "--front-goal-distance", type=float,
+        help="fix a goal this far in front of the first valid odom pose",
+    )
     parser.set_defaults(period=1.0 / 50.0)
     return parser
 
@@ -414,6 +442,8 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if (args.goal_x is None) != (args.goal_y is None):
         raise SystemExit("provide both --goal-x and --goal-y, or neither")
+    if args.front_goal_distance is not None and (args.goal_x is not None or args.goal_y is not None):
+        raise SystemExit("front-goal-distance cannot be combined with goal-x/goal-y")
     args.period = 1.0 / args.control_hz
     run(args)
 

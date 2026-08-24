@@ -270,8 +270,20 @@ def build_parser():
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
     import rclpy
+    from rclpy.utilities import remove_ros_args
+
+    # A ROS 2 executable launched through launch_ros receives remapping
+    # arguments after ``--ros-args``.  They belong to rclpy, not this
+    # adapter's application parser.
+    cli_args = remove_ros_args(args=argv)
+    # ``console_scripts`` normally exposes ``odom_se2_adapter`` here, while
+    # direct module/script launches may expose a Python file path instead.
+    # In both cases the first non-option is the executable name, not an
+    # adapter argument.
+    if cli_args and not cli_args[0].startswith("-"):
+        cli_args = cli_args[1:]
+    args = build_parser().parse_args(cli_args)
 
     rclpy.init(args=None)
     adapter = OdomSe3Adapter(args.calibration_yaml, args.input_topic, args.output_topic)
