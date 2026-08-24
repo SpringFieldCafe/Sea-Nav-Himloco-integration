@@ -21,6 +21,7 @@ from deploy.go2_onboard.sea_nav_himloco_navigation import (
     validate_navigation_himloco_policy,
     validate_navigation_model,
 )
+from deploy.go2_onboard.sea_nav_sport_navigation import official_mpc_contract_probe
 from deploy.go2_onboard.himloco_fixed_control import (
     FixedCommand,
     FixedHIMLocoController,
@@ -35,6 +36,18 @@ def test_navigation_model_contract_and_hash():
         "artifacts/go2_onboard/sea_nav_policy_peer_model_2000.json",
     )
     assert loaded.sha256 == "d1242c74ff56189f20d7a12948d86078287651cd1f70215d9c308d04f4b561de"
+
+
+def test_official_mpc_probe_uses_unit_projected_gravity_and_full_observation():
+    loaded = validate_navigation_model(
+        "artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt",
+        "artifacts/go2_onboard/sea_nav_policy_peer_model_2000.json",
+    )
+    probe = official_mpc_contract_probe(loaded)
+    assert probe["observation_shape"] == [1, 550]
+    assert probe["gravity_convention"] == "unit_projected_gravity_z=-1"
+    assert len(probe["probe_action"]) == 3
+    assert np.isfinite(probe["probe_action"]).all()
 
 
 def test_navigation_limits_allow_forward_arc_and_force_no_lateral_motion():

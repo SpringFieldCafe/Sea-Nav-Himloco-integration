@@ -13,6 +13,9 @@ import json
 import time
 from pathlib import Path
 
+import numpy as np
+import torch
+
 from .sea_nav_himloco_navigation import (
     DEFAULT_NAVIGATION_METADATA,
     DEFAULT_NAVIGATION_POLICY,
@@ -20,6 +23,8 @@ from .sea_nav_himloco_navigation import (
     NavigationProcess,
     validate_navigation_model,
 )
+from .model_loader import infer
+from .navigation_observation import NavigationObservation
 
 
 def build_parser():
@@ -59,13 +64,42 @@ def _load_sport_client(net):
     return client
 
 
+def official_mpc_contract_probe(loaded):
+    """Build the documented 550-D input without touching any robot transport.
+
+    The training contract stores projected gravity as a unit vector.  Keeping
+    this probe here prevents a Point-LIO ``m/s^2`` gravity diagnostic from
+    accidentally being fed to the navigation actor.
+    """
+    device = torch.device("cpu")
+    observation_builder = NavigationObservation(device)
+    observation = observation_builder.build(
+        torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
+        torch.zeros((1, 3), dtype=torch.float32),
+        torch.zeros((1, 3), dtype=torch.float32),
+        torch.zeros((1, 3), dtype=torch.float32),
+        torch.full((1, 41), 5.0, dtype=torch.float32),
+        torch.tensor([[2.0, 0.0]], dtype=torch.float32),
+    )
+    action = infer(loaded, observation, 3)[0].detach().cpu().numpy()
+    if not np.isfinite(action).all():
+        raise ValueError("official MPC contract probe returned non-finite action")
+    return {
+        "observation_shape": list(observation.shape),
+        "gravity_convention": "unit_projected_gravity_z=-1",
+        "probe_goal_body": [2.0, 0.0],
+        "probe_action": action.astype(float).tolist(),
+    }
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if (args.goal_x is None) != (args.goal_y is None):
         raise SystemExit("provide both --goal-x and --goal-y")
     if not 0.0 < args.navigation_hz <= 20.0:
         raise SystemExit("--navigation-hz must be in (0,20]")
-    validate_navigation_model(args.navigation_policy, args.navigation_metadata)
+    loaded = validate_navigation_model(args.navigation_policy, args.navigation_metadata)
+    probe = official_mpc_contract_probe(loaded)
     mailbox = NavigationMailbox(args.navigation_command_max_age)
     config = {
         "sensor_socket": args.sensor_socket,
@@ -91,6 +125,7 @@ def main(argv=None):
     navigation = NavigationProcess(config, mailbox)
     client = _load_sport_client(args.net) if args.enable_motion else None
     print(f"[official] backend=unitree_sport_mpc enable_motion={args.enable_motion}")
+    print("[official-contract] " + json.dumps(probe, separators=(",", ":")))
     print("[official] no LowCmd/joint target path")
     if not args.enable_motion:
         print("[official] SHADOW_ONLY: pass --enable-motion to call SportClient.Move")
