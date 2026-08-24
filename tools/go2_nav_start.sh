@@ -32,7 +32,7 @@ HIMLOCO_1460_SHA="cab2489dda7732a7d6f51595aa6362384445c738537d0c1c91569054c7b9f5
 GOAL_X=""
 GOAL_Y=""
 FORWARD=""
-SPEED="0.15"
+SPEED="inf"
 HIMLOCO="$HIMLOCO_DEFAULT"
 NAV_POLICY="$NAV_POLICY_DEFAULT"
 SELF_PIPE_PID=""
@@ -49,7 +49,7 @@ Usage:
   tools/go2_nav_start.sh --forward METERS [--speed MPS] [--himloco PATH] [--nav-policy PATH]
   tools/go2_nav_start.sh --goal-x X --goal-y Y [--speed MPS] [--himloco PATH] [--nav-policy PATH]
 
---speed is the navigation vx safety upper bound and is capped at 0.15 m/s.
+--speed is the navigation vx upper bound; use inf to disable the speed limit.
 Start/A remain manual. B remains the formal controller ESTOP.
 EOF
 }
@@ -103,9 +103,13 @@ is_number() {
   }'
 }
 
-is_number "$SPEED" || die "--speed must be finite"
-awk -v speed="$SPEED" 'BEGIN { exit !(speed >= 0.0 && speed <= 0.15) }' \
-  || die "--speed must be in [0,0.15] m/s"
+if [[ "$SPEED" != inf ]]; then
+  is_number "$SPEED" || die "--speed must be finite or inf"
+fi
+if [[ "$SPEED" != inf ]]; then
+  awk -v speed="$SPEED" 'BEGIN { exit !(speed >= 0.0) }' \
+    || die "--speed must be non-negative or inf"
+fi
 
 if [[ -n "$FORWARD" ]]; then
   [[ -z "$GOAL_X" && -z "$GOAL_Y" ]] || die "use --forward or --goal-x/--goal-y, not both"

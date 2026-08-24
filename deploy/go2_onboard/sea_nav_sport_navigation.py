@@ -34,9 +34,9 @@ def build_parser():
     parser.add_argument("--navigation-policy", default=DEFAULT_NAVIGATION_POLICY)
     parser.add_argument("--navigation-metadata", default=DEFAULT_NAVIGATION_METADATA)
     parser.add_argument("--navigation-log", required=True)
-    parser.add_argument("--navigation-vx-max", type=float, default=0.15)
+    parser.add_argument("--navigation-vx-max", type=float, default=float("inf"))
     parser.add_argument("--fixed-sport-vx", type=float, default=None,
-                        help="diagnostic fixed SportClient vx; capped at 0.15 m/s")
+                        help="diagnostic fixed SportClient vx; no software speed cap")
     parser.add_argument("--navigation-vy-max", type=float, default=0.0)
     parser.add_argument("--navigation-filter-alpha", type=float, default=0.15)
     parser.add_argument("--navigation-hz", type=float, default=10.0)
@@ -142,8 +142,8 @@ def main(argv=None):
         raise SystemExit("--navigation-hz must be in (0,20]")
     fixed_vx = args.fixed_sport_vx
     if fixed_vx is not None:
-        if not np.isfinite(fixed_vx) or abs(fixed_vx) > 0.15:
-            raise SystemExit("--fixed-sport-vx must be finite and within +/-0.15 m/s")
+        if not np.isfinite(fixed_vx):
+            raise SystemExit("--fixed-sport-vx must be finite")
         loaded = None
         probe = {"mode": "FIXED_SPORT_DIAGNOSTIC", "fixed_command": [fixed_vx, 0.0, 0.0]}
     else:

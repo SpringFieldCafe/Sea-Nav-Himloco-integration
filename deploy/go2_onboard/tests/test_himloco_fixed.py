@@ -367,12 +367,11 @@ def test_legacy_reproduction_requires_approved_file_content():
     unknown.unlink()
 
 
-def test_normal_mode_still_rejects_legacy_speed():
-    with pytest.raises(SafetyError, match="conservative first-test limit"):
-        validate_fixed_command(0.4, 0.0, 0.0)
+def test_normal_mode_allows_speed_above_old_test_limit():
+    assert validate_fixed_command(0.4, 0.0, 0.0).vx == pytest.approx(0.4)
 
 
-@pytest.mark.parametrize("command", [(-0.01, 0.0, 0.0), (0.16, 0.0, 0.0), (0.0, 0.01, 0.0), (0.1, 0.0, 0.1)])
+@pytest.mark.parametrize("command", [(-0.01, 0.0, 0.0), (0.0, 0.01, 0.0), (0.1, 0.0, 0.1)])
 def test_fixed_command_whitelist_rejects_unsafe_modes(command):
     with pytest.raises(SafetyError):
         validate_fixed_command(*command)

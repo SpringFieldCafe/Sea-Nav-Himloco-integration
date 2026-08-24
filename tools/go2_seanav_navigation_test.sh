@@ -23,7 +23,7 @@ NAV_METADATA="$ROOT/artifacts/go2_onboard/sea_nav_policy_peer_model_2000.json"
 GOAL_X=""
 GOAL_Y=""
 FRONT_GOAL_DISTANCE=""
-NAV_VX_MAX=0.15
+NAV_VX_MAX=inf
 NAV_VY_MAX=0
 FIXED_SPORT_VX=""
 GOAL_TOLERANCE=0.15
@@ -462,9 +462,9 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --goal-x VALUE             world-frame goal x
   --goal-y VALUE             world-frame goal y
   --front-goal-distance M    fix a goal M meters ahead of first odom pose
-  --navigation-vx-max VALUE  forward safety limit, default 0.15
-  --navigation-vy-max VALUE  lateral safety limit, default 0
-  --fixed-sport-vx VALUE      diagnostic fixed SportClient command, max 0.15
+  --navigation-vx-max VALUE  forward speed limit, default inf (disabled)
+  --navigation-vy-max VALUE  lateral speed limit, default 0
+  --fixed-sport-vx VALUE      diagnostic fixed SportClient command, no speed cap
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --assume-clear-lidar       explicit no-obstacle-avoidance test mode
   --enable-official-motion   explicitly forward SEA-Nav commands to SportClient.Move

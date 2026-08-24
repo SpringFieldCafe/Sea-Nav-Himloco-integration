@@ -47,10 +47,10 @@ DEFAULT_SENSOR_SOCKET = "/tmp/sea_nav_shadow.sock"
 DEFAULT_NAVIGATION_LOG = "logs/go2_navigation/navigation.jsonl"
 SEA_SHA256 = "d1242c74ff56189f20d7a12948d86078287651cd1f70215d9c308d04f4b561de"
 HIM_1460_SHA256 = "cab2489dda7732a7d6f51595aa6362384445c738537d0c1c91569054c7b9f5d1"
-NAV_LOWER = np.asarray([0.0, 0.0, -0.15], dtype=np.float32)
-NAV_UPPER = np.asarray([0.15, 0.0, 0.15], dtype=np.float32)
-NAV_VX_MAX = 0.15
-NAV_VY_MAX = 0.15
+NAV_LOWER = np.asarray([0.0, -np.inf, -np.inf], dtype=np.float32)
+NAV_UPPER = np.asarray([np.inf, 0.0, np.inf], dtype=np.float32)
+NAV_VX_MAX = float("inf")
+NAV_VY_MAX = float("inf")
 
 
 def sha256_file(path: str) -> str:
@@ -89,10 +89,12 @@ class NavigationLimiter:
                  vy_max: float = 0.0):
         vx_max = float(vx_max)
         vy_max = float(vy_max)
-        if not np.isfinite(vx_max) or not 0.0 <= vx_max <= NAV_VX_MAX:
-            raise ValueError(f"navigation vx max must be in [0,{NAV_VX_MAX}]")
-        if not np.isfinite(vy_max) or not 0.0 <= vy_max <= NAV_VY_MAX:
-            raise ValueError(f"navigation vy max must be in [0,{NAV_VY_MAX}]")
+        if not np.isfinite(vx_max) and not np.isinf(vx_max):
+            raise ValueError("navigation vx max must be non-negative")
+        if not np.isfinite(vy_max) and not np.isinf(vy_max):
+            raise ValueError("navigation vy max must be non-negative")
+        if vx_max < 0.0 or vy_max < 0.0:
+            raise ValueError("navigation velocity limits must be non-negative")
         upper = NAV_UPPER.copy()
         upper[0] = vx_max
         lower = NAV_LOWER.copy()
@@ -650,13 +652,13 @@ def build_parser():
         "--navigation-vx-max",
         type=float,
         default=NAV_VX_MAX,
-        help="navigation forward-vx safety upper bound in m/s; maximum 0.15",
+        help="navigation forward-vx upper bound in m/s; inf disables the speed limit",
     )
     parser.add_argument(
         "--navigation-vy-max",
         type=float,
         default=0.0,
-        help="optional lateral-vy safety bound in m/s; default 0",
+        help="optional lateral-vy bound in m/s; inf disables the lateral speed limit",
     )
     parser.add_argument("--navigation-connect-timeout", type=float, default=10.0)
     parser.add_argument("--navigation-summary-interval", type=float, default=1.0)
@@ -690,10 +692,10 @@ def main(argv=None):
         raise SystemExit("navigation freshness and goal tolerance must be positive")
     if args.goal_reached_confirmations < 1:
         raise SystemExit("--goal-reached-confirmations must be positive")
-    if not np.isfinite(args.navigation_vx_max) or not 0.0 <= args.navigation_vx_max <= NAV_VX_MAX:
-        raise SystemExit(f"--navigation-vx-max must be in [0,{NAV_VX_MAX}]")
-    if not np.isfinite(args.navigation_vy_max) or not 0.0 <= args.navigation_vy_max <= NAV_VY_MAX:
-        raise SystemExit(f"--navigation-vy-max must be in [0,{NAV_VY_MAX}]")
+    if (not np.isfinite(args.navigation_vx_max) and not np.isinf(args.navigation_vx_max)) or args.navigation_vx_max < 0.0:
+        raise SystemExit("--navigation-vx-max must be non-negative or inf")
+    if (not np.isfinite(args.navigation_vy_max) and not np.isinf(args.navigation_vy_max)) or args.navigation_vy_max < 0.0:
+        raise SystemExit("--navigation-vy-max must be non-negative or inf")
     # The fixed controller parser is reused for its transport/safety options.
     # Navigation owns the command source; non-zero fixed commands are rejected
     # instead of silently becoming a second command path.
@@ -719,7 +721,7 @@ def main(argv=None):
         "[safety] NAVIGATION_SAFETY_PROFILE "
         f"vx=[0,{args.navigation_vx_max:.6f}] "
         f"vy=[-{args.navigation_vy_max:.6f},+{args.navigation_vy_max:.6f}] "
-        "wz=[-0.15,+0.15]"
+        "wz=unlimited"
     )
 
     mailbox = NavigationMailbox(args.navigation_command_max_age)

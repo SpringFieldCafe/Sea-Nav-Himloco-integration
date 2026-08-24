@@ -54,10 +54,10 @@ def test_navigation_limits_allow_forward_arc_and_force_no_lateral_motion():
     limiter = NavigationLimiter(filter_alpha=1.0)
     raw, limited, safe = limiter.apply([0.4, 0.8, -0.4])
     np.testing.assert_allclose(raw, [0.4, 0.8, -0.4])
-    np.testing.assert_allclose(limited, [0.15, 0.0, -0.15])
-    np.testing.assert_allclose(safe, [0.15, 0.0, -0.15])
-    np.testing.assert_allclose(NAV_LOWER, [0.0, 0.0, -0.15])
-    np.testing.assert_allclose(NAV_UPPER, [0.15, 0.0, 0.15])
+    np.testing.assert_allclose(limited, [0.4, 0.0, -0.4])
+    np.testing.assert_allclose(safe, [0.4, 0.0, -0.4])
+    np.testing.assert_allclose(NAV_LOWER, [0.0, -np.inf, -np.inf])
+    np.testing.assert_allclose(NAV_UPPER, [np.inf, 0.0, np.inf])
 
 
 def test_navigation_vx_max_is_a_limiter_bound_not_a_fixed_command():
@@ -76,9 +76,11 @@ def test_navigation_vy_can_be_explicitly_enabled_for_2d_experiment():
     np.testing.assert_allclose(safe, [0.1, 0.1, 0.0])
 
 
-def test_navigation_vx_max_cannot_exceed_global_safety_limit():
-    with pytest.raises(ValueError, match="navigation vx max"):
-        NavigationLimiter(vx_max=0.150001)
+def test_navigation_vx_max_can_be_unlimited():
+    limiter = NavigationLimiter(filter_alpha=1.0, vx_max=float("inf"))
+    _, limited, safe = limiter.apply([2.0, 0.0, 0.0])
+    np.testing.assert_allclose(limited, [2.0, 0.0, 0.0])
+    np.testing.assert_allclose(safe, [2.0, 0.0, 0.0])
 
 
 def test_navigation_worker_config_dict_reaches_freshness_gate():

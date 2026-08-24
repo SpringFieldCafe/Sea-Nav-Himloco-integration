@@ -225,8 +225,6 @@ def validate_fixed_command(
 
     if abs(float(vy)) > 1e-8:
         raise SafetyError("first milestone permits vy=0 only")
-    if abs(float(vx)) > 0.15 or abs(float(wz)) > 0.15:
-        raise SafetyError("fixed command exceeds conservative first-test limit 0.15")
     nonzero = int(np.count_nonzero(np.abs(values) > 1e-8))
     if nonzero > 1 or (abs(float(vx)) > 1e-8 and float(vx) < 0.0):
         raise SafetyError("only zero, tiny forward, or tiny yaw is allowed")
