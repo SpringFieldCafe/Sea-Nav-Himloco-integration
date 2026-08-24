@@ -18,7 +18,6 @@ LOG_ROOT="$RUN_ROOT/logs"
 PID_ROOT="$RUN_ROOT/pids"
 
 POLICY="$ROOT/models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt"
-SLR_MODEL_ROOT="$ROOT/training/legged_gym/legged_gym/ctrl_model"
 NAV_POLICY="$ROOT/artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt"
 NAV_METADATA="$ROOT/artifacts/go2_onboard/sea_nav_policy_peer_model_2000.json"
 GOAL_X=""
@@ -28,8 +27,7 @@ NAV_VX_MAX=0.15
 NAV_VY_MAX=0
 GOAL_TOLERANCE=0.15
 ASSUME_CLEAR_LIDAR=0
-SLR_ZERO_COMMAND=0
-SLR_HOLD_DURATION=0
+ENABLE_OFFICIAL_MOTION=0
 CLEANED=0
 SUMMARY_WRITTEN=0
 
@@ -221,20 +219,14 @@ try:
         raise SystemExit(2)
     initial = str((data or {}).get("name", "") or "")
     print(f"INITIAL_MODE={initial}")
-    if initial == "mcf":
-        print("RELEASE_REQUEST=REQUESTED")
-        release_code, _ = client.ReleaseMode()
-        if release_code != 0:
-            print(f"RELEASE_RESULT=FAIL:{release_code}")
-            raise SystemExit(3)
-    else:
-        print("MCF already released")
-        print("RELEASE_REQUEST=NOT_NEEDED")
+    # Official SportClient/MPC owns the motion service.  Releasing MCF here
+    # would hand control to the low-level path and break the official backend.
+    print("RELEASE_REQUEST=NOT_REQUESTED")
     final_code, final_data = client.CheckMode()
     final = str((final_data or {}).get("name", "") or "")
     print(f"FINAL_MODE={final}")
-    print("RELEASE_RESULT=PASS" if final_code == 0 and final == "" else "RELEASE_RESULT=FAIL")
-    raise SystemExit(0 if final_code == 0 and final == "" else 4)
+    print("MCF_STATUS=READ_ONLY" if final_code == 0 else "MCF_STATUS=FAIL")
+    raise SystemExit(0 if final_code == 0 else 4)
 except SystemExit:
     raise
 except Exception as exc:
@@ -246,7 +238,7 @@ PY
     die "MCF_STATUS=FAIL"
   fi
   printf '%s\n' "$output" | tee "$LOG_ROOT/mcf.log"
-  grep -q '^FINAL_MODE=$' "$LOG_ROOT/mcf.log" || die "MCF_STATUS=FAIL final mode is not empty"
+  grep -q '^MCF_STATUS=READ_ONLY$' "$LOG_ROOT/mcf.log" || die "MCF_STATUS=FAIL read-only check failed"
   MCF_STATUS=PASS
   say_red "MCF_STATUS=PASS"
 }
@@ -329,12 +321,9 @@ start_monitors() {
 }
 
 start_navigation() {
-  for model in body_latest.jit encoder_vel.jit encoder_latent.jit; do
-    [[ -f "$SLR_MODEL_ROOT/$model" ]] || die "missing SLR model: $SLR_MODEL_ROOT/$model"
-  done
   [[ -f "$NAV_POLICY" ]] || die "missing navigation policy: $NAV_POLICY"
   [[ -f "$NAV_METADATA" ]] || die "missing navigation metadata: $NAV_METADATA"
-  say_yellow "WAIT_FOR_POSE_ARM: SLR controller keeps Start/A manual; B is ESTOP"
+  say_yellow "WAIT_FOR_POSE_ARM: official Sport/MPC path; motion requires --enable-official-motion"
   local -a args=(
     "$NET"
     --sensor-socket "$SOCKET"
@@ -344,14 +333,18 @@ start_navigation() {
     --navigation-vy-max "$NAV_VY_MAX"
     --goal-tolerance "$GOAL_TOLERANCE"
     --navigation-log "$RUN_ROOT/navigation.log"
-    --event-trace "$RUN_ROOT/slr_event_trace.jsonl"
-    --hold-duration "$SLR_HOLD_DURATION"
+    --enable-motion
   )
+  [[ -n "$GOAL_X" ]] && args+=(--goal-x "$GOAL_X" --goal-y "$GOAL_Y")
   ((ASSUME_CLEAR_LIDAR)) && args+=(--assume-clear-lidar)
-  ((SLR_ZERO_COMMAND)) && args+=(--zero-navigation-command)
-  say_red "[START] SEA-Nav navigation + original SLR locomotion"
-  say_yellow "WAIT_FOR_POSE_ARM: manually Start, then A; press B for ESTOP"
-  "$PYTHON" -m deploy.go2_onboard.sea_nav_slr_navigation \
+  ((ENABLE_OFFICIAL_MOTION)) || args=("${args[@]/--enable-motion}")
+  say_red "[START] SEA-Nav navigation + Unitree official Sport/MPC"
+  if ((ENABLE_OFFICIAL_MOTION)); then
+    say_red "WAIT_FOR_POSE_ARM: type START only after the robot is clear and already safely standing"
+    read -r -p "Type START to enable SportClient.Move, or Ctrl+C to abort: " confirmation
+    [[ "$confirmation" == START ]] || die "official motion not confirmed"
+  fi
+  "$PYTHON" -m deploy.go2_onboard.sea_nav_sport_navigation \
     "${args[@]}" >"$RUN_ROOT/himloco.log" 2>&1 &
   write_pid navigation "$!"
   NAVIGATION_STATUS=RUNNING
@@ -410,9 +403,8 @@ write_summary() {
   {
     printf 'CPU_STATUS=%s\nMCF_STATUS=%s\nRAW_SENSOR_STATUS=%s\n' "$CPU_STATUS" "$MCF_STATUS" "$RAW_SENSOR_STATUS"
     printf 'TRANSFORM_STATUS=%s\nDESKEW_STATUS=%s\nPOINT_LIO_STATUS=%s\n' "$TRANSFORM_STATUS" "$DESKEW_STATUS" "$POINT_LIO_STATUS"
-  printf 'LOCOMOTION_BACKEND=SLR\nSLR_MODEL_ROOT=%s\n' "$SLR_MODEL_ROOT"
-  printf 'SLR_ZERO_COMMAND=%s\nSLR_HOLD_DURATION=%s\n' "$SLR_ZERO_COMMAND" "$SLR_HOLD_DURATION"
-  printf 'POLICY_UNUSED_BY_SLR=%s\nPOLICY_SHA256=%s\n' "$POLICY" "$policy_sha"
+  printf 'LOCOMOTION_BACKEND=UNITREE_SPORT_MPC\nOFFICIAL_MOTION_ENABLED=%s\n' "$ENABLE_OFFICIAL_MOTION"
+  printf 'POLICY_UNUSED_BY_SPORT_MPC=%s\nPOLICY_SHA256=%s\n' "$POLICY" "$policy_sha"
     printf 'NAVIGATION_POLICY=%s\nNAVIGATION_POLICY_SHA256=%s\nNAVIGATION_METADATA=%s\n' "$NAV_POLICY" "$nav_sha" "$NAV_METADATA"
     printf 'GOAL_X=%s\nGOAL_Y=%s\nFRONT_GOAL_DISTANCE=%s\nGOAL_TOLERANCE=%s\nNAVIGATION_VX_MAX=%s\nNAVIGATION_VY_MAX=%s\nASSUME_CLEAR_LIDAR=%s\n' "$GOAL_X" "$GOAL_Y" "$FRONT_GOAL_DISTANCE" "$GOAL_TOLERANCE" "$NAV_VX_MAX" "$NAV_VY_MAX" "$ASSUME_CLEAR_LIDAR"
     printf 'LIDAR_RATE_HZ=%s\nDESKEW_RATE_HZ=%s\nODOM_RATE_HZ=%s\n' "$cloud_rate" "$deskew_rate" "$odom_rate"
@@ -465,8 +457,7 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --navigation-vy-max VALUE  lateral safety limit, default 0
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --assume-clear-lidar       explicit no-obstacle-avoidance test mode
-  --slr-zero-command         feed SLR [0,0,0], ignoring SEA-Nav for smoke testing
-  --slr-hold-duration SEC    stop SLR smoke test after SEC active seconds
+  --enable-official-motion   explicitly forward SEA-Nav commands to SportClient.Move
 EOF
 }
 
@@ -487,8 +478,7 @@ main() {
       --navigation-vy-max) (($# >= 2)) || die "--navigation-vy-max requires a value"; NAV_VY_MAX="$2"; shift 2 ;;
       --goal-tolerance) (($# >= 2)) || die "--goal-tolerance requires a value"; GOAL_TOLERANCE="$2"; shift 2 ;;
       --assume-clear-lidar) ASSUME_CLEAR_LIDAR=1; shift ;;
-      --slr-zero-command) SLR_ZERO_COMMAND=1; shift ;;
-      --slr-hold-duration) (($# >= 2)) || die "--slr-hold-duration requires a value"; SLR_HOLD_DURATION="$2"; shift 2 ;;
+      --enable-official-motion) ENABLE_OFFICIAL_MOTION=1; shift ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown argument: $1" ;;
     esac
