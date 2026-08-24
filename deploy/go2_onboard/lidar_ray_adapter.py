@@ -35,7 +35,7 @@ class LidarRayAdapter:
 
     def __init__(self, device, ray_count=41, min_distance=0.1, max_distance=5.0,
                  angle_min=-2.0 * math.pi / 3.0, angle_max=2.0 * math.pi / 3.0,
-                 min_z=-0.25, max_z=1.0):
+                 min_z=-0.15, max_z=1.0):
         import torch
 
         self._torch = torch
@@ -82,7 +82,7 @@ class NumpyLidarRayAdapter:
 
     def __init__(self, ray_count=41, min_distance=0.1, max_distance=5.0,
                  angle_min=-2.0 * math.pi / 3.0, angle_max=2.0 * math.pi / 3.0,
-                 min_z=-0.25, max_z=1.0):
+                 min_z=-0.15, max_z=1.0):
         self.ray_count = ray_count
         self.min_distance = min_distance
         self.max_distance = max_distance
@@ -126,7 +126,10 @@ class LidarRayCache:
     """
 
     def __init__(self, adapter=None):
-        self.adapter = adapter or NumpyLidarRayAdapter()
+        # The native Go2 cloud contains a dense floor return around z=-0.2 m.
+        # Keep it out of the learned obstacle rays by using the deployment
+        # default adapter, whose lower bound is -0.15 m.
+        self.adapter = adapter or NumpyLidarRayAdapter(min_z=-0.15)
         self._lock = threading.RLock()
         self._rays = np.full((41,), self.adapter.max_distance, dtype=np.float32)
         self._received_at = 0.0

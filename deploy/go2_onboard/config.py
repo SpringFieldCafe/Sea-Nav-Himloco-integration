@@ -28,6 +28,7 @@ class RuntimeConfig:
     ray_max_distance: float = 5.0
     ray_angle_min: float = -2.0 * 3.141592653589793 / 3.0
     ray_angle_max: float = 2.0 * 3.141592653589793 / 3.0
-    lidar_min_z: float = -0.25
+    # Native cloud_base includes floor returns around z=-0.2 m.
+    lidar_min_z: float = -0.15
     lidar_max_z: float = 1.0
     log_interval: float = 1.0

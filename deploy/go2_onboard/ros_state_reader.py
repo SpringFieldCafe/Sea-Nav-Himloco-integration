@@ -131,7 +131,7 @@ class RosStateReader:
         from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
         from nav_msgs.msg import Odometry
         from sensor_msgs.msg import PointCloud2
-        from unitree_go.msg import LowState, WirelessController
+        from unitree_go.msg import LowState, SportModeState, WirelessController
         from geometry_msgs.msg import PointStamped
 
         self._rclpy = rclpy
@@ -154,6 +154,7 @@ class RosStateReader:
         self.odom = Latest()
         self.odom_frame_stats = OdomFrameStats()
         self.wireless = Latest()
+        self.sport_state = Latest()
         self.goal = Latest()
         self.node = rclpy.create_node("sea_nav_go2_shadow_runtime")
         self._executor_type = SingleThreadedExecutor
@@ -161,6 +162,10 @@ class RosStateReader:
         self.node.create_subscription(PointCloud2, topics.lidar, self._lidar_callback, 10)
         self.node.create_subscription(Odometry, topics.odom, self._odom_callback, 10)
         self.node.create_subscription(WirelessController, topics.wireless, self._wireless_callback, 10)
+        if getattr(topics, "sport_state", ""):
+            self.node.create_subscription(
+                SportModeState, topics.sport_state, self._sport_state_callback, 10,
+            )
         if getattr(topics, "goal", ""):
             self.node.create_subscription(PointStamped, topics.goal, self._goal_callback, 10)
 
@@ -274,6 +279,9 @@ class RosStateReader:
 
     def _wireless_callback(self, msg):
         self._store(self.wireless, msg, msg)
+
+    def _sport_state_callback(self, msg):
+        self._store(self.sport_state, msg, msg)
 
     def _goal_callback(self, msg):
         from .goal import Goal2D

@@ -90,7 +90,7 @@ def test_lidar_preprocessing_is_41_rays_and_clipped():
 
 
 def test_lidar_self_filter_removes_measured_front_self_cluster_only():
-    adapter = NumpyLidarRayAdapter()
+    adapter = NumpyLidarRayAdapter(min_z=-0.25)
     points = np.asarray([
         [0.63, 0.04, -0.24],  # measured center self-return region
         [0.42, 0.20, -0.24],  # measured side self-return region
@@ -106,10 +106,18 @@ def test_lidar_self_filter_removes_measured_front_self_cluster_only():
 
 
 def test_lidar_self_filter_preserves_external_same_distance_point():
-    adapter = NumpyLidarRayAdapter()
+    adapter = NumpyLidarRayAdapter(min_z=-0.25)
     points = np.asarray([[0.42, 0.30, -0.21]], dtype=np.float32)
     rays = adapter.project(points)[0]
     assert rays[int(round((math.radians(35.0) - (-2.0 * math.pi / 3.0)) / ((4.0 * math.pi / 3.0) / 40.0)))] == pytest.approx(0.516, abs=0.01)
+
+
+def test_deployment_default_ray_filter_rejects_native_floor_return():
+    adapter = NumpyLidarRayAdapter()
+    floor = np.asarray([[0.34, 0.0, -0.21]], dtype=np.float32)
+    elevated = np.asarray([[0.34, 0.0, 0.05]], dtype=np.float32)
+    assert adapter.project(floor)[0, 20] == pytest.approx(5.0)
+    assert adapter.project(elevated)[0, 20] == pytest.approx(0.34)
 
 
 def test_assume_clear_lidar_preserves_history_and_replaces_ray_encoding():

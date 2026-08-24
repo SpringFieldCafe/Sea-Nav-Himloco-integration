@@ -24,6 +24,7 @@ class Topics:
         self.lidar = args.lidar_topic
         self.odom = args.odom_topic
         self.wireless = args.wireless_topic
+        self.sport_state = getattr(args, "sport_state_topic", "rt/sportmodestate")
         self.goal = args.goal_topic
 
 
@@ -83,6 +84,25 @@ def _odom_record(reader):
     }
 
 
+def _lowstate_record(reader):
+    low = reader.lowstate.value
+    if low is None:
+        return None
+    gyro = np.asarray(low.gyro, dtype=np.float64).reshape(-1)
+    q_motor = np.asarray(low.q_motor, dtype=np.float64).reshape(-1)
+    dq_motor = np.asarray(low.dq_motor, dtype=np.float64).reshape(-1)
+    return {
+        "quaternion_wxyz": np.asarray(low.quaternion).reshape(-1).tolist(),
+        "gyro_xyz": gyro.tolist(),
+        "gyro_norm": float(np.linalg.norm(gyro)),
+        "q_motor": q_motor.tolist(),
+        "dq_motor": dq_motor.tolist(),
+        "dq_motor_norm": float(np.linalg.norm(dq_motor)),
+        "dq_motor_max_abs": float(np.max(np.abs(dq_motor))) if dq_motor.size else 0.0,
+        "frame_id": low.frame_id,
+    }
+
+
 class ReadOnlyDiagnostics:
     def __init__(self, args):
         self.args = args
@@ -93,7 +113,7 @@ class ReadOnlyDiagnostics:
         self.ray_adapter = NumpyLidarRayAdapter(
             ray_count=41, min_distance=0.1, max_distance=5.0,
             angle_min=-2.0 * np.pi / 3.0, angle_max=2.0 * np.pi / 3.0,
-            min_z=-0.25, max_z=1.0,
+            min_z=-0.15, max_z=1.0,
         )
         self.started = time.monotonic()
         self.last_report = 0.0
@@ -150,6 +170,9 @@ class ReadOnlyDiagnostics:
             "runtime_state": "READ_ONLY",
             "sensor": health,
             "odom": _odom_record(self.reader),
+            "lowstate": _lowstate_record(self.reader),
+            "sport_state": _ros_value(self.reader.sport_state.value),
+            "sport_state_stream": self.reader.sport_state.summary(),
             "goal": self.goal_manager.current,
             "goal_robot_xy": goal_robot_xy,
             "wireless_raw_fields": _ros_value(self.reader.wireless.value),
@@ -178,6 +201,7 @@ def build_parser():
     parser.add_argument("--lidar-topic", default="/utlidar/cloud_base")
     parser.add_argument("--odom-topic", default="/utlidar/robot_odom")
     parser.add_argument("--wireless-topic", default="/wirelesscontroller")
+    parser.add_argument("--sport-state-topic", default="rt/sportmodestate")
     parser.add_argument("--goal-topic", default="/sea_nav/goal2d")
     parser.add_argument("--base-frame", default="base_link")
     parser.add_argument("--report-interval", type=float, default=1.0)

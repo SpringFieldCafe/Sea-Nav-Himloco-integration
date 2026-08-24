@@ -35,6 +35,8 @@ def build_parser():
     parser.add_argument("--navigation-metadata", default=DEFAULT_NAVIGATION_METADATA)
     parser.add_argument("--navigation-log", required=True)
     parser.add_argument("--navigation-vx-max", type=float, default=0.15)
+    parser.add_argument("--fixed-sport-vx", type=float, default=None,
+                        help="diagnostic fixed SportClient vx; capped at 0.15 m/s")
     parser.add_argument("--navigation-vy-max", type=float, default=0.0)
     parser.add_argument("--navigation-filter-alpha", type=float, default=0.15)
     parser.add_argument("--navigation-hz", type=float, default=10.0)
@@ -62,6 +64,46 @@ def _load_sport_client(net):
     client.SetTimeout(5.0)
     client.Init()
     return client
+
+
+def _prepare_official_motion(client):
+    """Enter the official standing/walking state before sending navigation commands."""
+    prepare_started = time.monotonic()
+    joystick_result = client.SwitchJoystick(False)
+    print(f"[official-motion] SwitchJoystick(false) result={joystick_result}")
+    if joystick_result not in (None, 0):
+        raise RuntimeError(f"SportClient.SwitchJoystick(false) failed: {joystick_result}")
+    time.sleep(0.5)
+    stand_result = client.StandUp()
+    print(f"[official-motion] StandUp result={stand_result}")
+    if stand_result not in (None, 0):
+        raise RuntimeError(f"SportClient.StandUp failed: {stand_result}")
+    time.sleep(2.0)
+    balance_result = client.BalanceStand()
+    print(f"[official-motion] BalanceStand result={balance_result}")
+    if balance_result not in (None, 0):
+        raise RuntimeError(f"SportClient.BalanceStand failed: {balance_result}")
+    time.sleep(1.0)
+    print(json.dumps({
+        "stage": "motion_prepare_complete",
+        "elapsed_ms": (time.monotonic() - prepare_started) * 1000.0,
+    }, separators=(",", ":")))
+
+
+def _official_motion_diagnostics(client):
+    """Query SDK-exposed read-only service facts; never changes motion state."""
+    result = {"stage": "motion_service_diagnostics"}
+    for name in ("GetApiVersion", "GetServerApiVersion", "GetLeaseId", "AutoRecoveryGet"):
+        try:
+            value = getattr(client, name)()
+            if isinstance(value, tuple):
+                value = list(value)
+            result[name] = value
+        except Exception as exc:
+            result[name] = f"ERROR:{type(exc).__name__}:{exc}"
+    print("[official-motion-state] " + json.dumps(
+        result, separators=(",", ":"), default=str,
+    ))
 
 
 def official_mpc_contract_probe(loaded):
@@ -98,8 +140,15 @@ def main(argv=None):
         raise SystemExit("provide both --goal-x and --goal-y")
     if not 0.0 < args.navigation_hz <= 20.0:
         raise SystemExit("--navigation-hz must be in (0,20]")
-    loaded = validate_navigation_model(args.navigation_policy, args.navigation_metadata)
-    probe = official_mpc_contract_probe(loaded)
+    fixed_vx = args.fixed_sport_vx
+    if fixed_vx is not None:
+        if not np.isfinite(fixed_vx) or abs(fixed_vx) > 0.15:
+            raise SystemExit("--fixed-sport-vx must be finite and within +/-0.15 m/s")
+        loaded = None
+        probe = {"mode": "FIXED_SPORT_DIAGNOSTIC", "fixed_command": [fixed_vx, 0.0, 0.0]}
+    else:
+        loaded = validate_navigation_model(args.navigation_policy, args.navigation_metadata)
+        probe = official_mpc_contract_probe(loaded)
     mailbox = NavigationMailbox(args.navigation_command_max_age)
     config = {
         "sensor_socket": args.sensor_socket,
@@ -122,29 +171,42 @@ def main(argv=None):
         "lidar_max_age": 0.20,
         "assume_clear_lidar": args.assume_clear_lidar,
     }
-    navigation = NavigationProcess(config, mailbox)
+    navigation = None if fixed_vx is not None else NavigationProcess(config, mailbox)
     client = _load_sport_client(args.net) if args.enable_motion else None
     print(f"[official] backend=unitree_sport_mpc enable_motion={args.enable_motion}")
     print("[official-contract] " + json.dumps(probe, separators=(",", ":")))
     print("[official] no LowCmd/joint target path")
     if not args.enable_motion:
         print("[official] SHADOW_ONLY: pass --enable-motion to call SportClient.Move")
-    navigation.start()
+    else:
+        _prepare_official_motion(client)
+        _official_motion_diagnostics(client)
+    if navigation is not None:
+        navigation.start()
     started = time.monotonic()
     try:
         period = 1.0 / args.navigation_hz
+        command_sequence = 0
         while args.duration <= 0.0 or time.monotonic() - started < args.duration:
-            command, reason, age = mailbox.current()
-            if reason:
-                command = command.__class__(0.0, 0.0, 0.0)
-            values = command.as_array().tolist()
+            if fixed_vx is not None:
+                values = [float(fixed_vx), 0.0, 0.0]
+                reason, age = "fixed_sport_diagnostic", 0.0
+            else:
+                command, reason, age = mailbox.current()
+                if reason:
+                    command = command.__class__(0.0, 0.0, 0.0)
+                values = command.as_array().tolist()
+            command_sequence += 1
+            move_started = time.monotonic()
             if client is not None:
                 result = client.Move(float(values[0]), float(values[1]), float(values[2]))
             else:
                 result = "SHADOW"
+            move_elapsed_ms = (time.monotonic() - move_started) * 1000.0
             print("[official-command] " + json.dumps({
-                "command": values, "reason": reason, "age_s": age,
-                "result": result,
+                "sequence": command_sequence, "command": values,
+                "reason": reason, "age_s": age, "result": result,
+                "move_elapsed_ms": move_elapsed_ms,
             }, separators=(",", ":")))
             time.sleep(period)
     except KeyboardInterrupt:
@@ -155,7 +217,8 @@ def main(argv=None):
                 print(f"[official] StopMove result={client.StopMove()}")
             except Exception as exc:
                 print(f"[official] StopMove failed: {type(exc).__name__}: {exc}")
-        navigation.stop()
+        if navigation is not None:
+            navigation.stop()
     return 0
 
 

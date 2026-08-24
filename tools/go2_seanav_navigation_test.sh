@@ -25,6 +25,7 @@ GOAL_Y=""
 FRONT_GOAL_DISTANCE=""
 NAV_VX_MAX=0.15
 NAV_VY_MAX=0
+FIXED_SPORT_VX=""
 GOAL_TOLERANCE=0.15
 ASSUME_CLEAR_LIDAR=0
 ENABLE_OFFICIAL_MOTION=0
@@ -34,9 +35,9 @@ SUMMARY_WRITTEN=0
 CPU_STATUS=FAIL
 MCF_STATUS=FAIL
 RAW_SENSOR_STATUS=FAIL
-TRANSFORM_STATUS=FAIL
-DESKEW_STATUS=FAIL
-POINT_LIO_STATUS=FAIL
+TRANSFORM_STATUS=NOT_USED_OFFICIAL
+DESKEW_STATUS=OFFICIAL_NATIVE
+POINT_LIO_STATUS=NOT_USED_OFFICIAL
 NAVIGATION_STATUS=NOT_STARTED
 MOTION_STATUS=NOT_MEASURED
 EXIT_REASON=NOT_RECORDED
@@ -276,48 +277,46 @@ find_descendant() {
   return 1
 }
 
-start_lio() {
-  say_red "[START] point_lio_go2.launch.py deskew:=true"
-  ros2 launch sea_nav_lio_bringup point_lio_go2.launch.py deskew:=true \
-    >"$LOG_ROOT/point_lio.log" 2>&1 &
-  local launch_pid="$!" transform_pid point_pid adapter_pid
-  write_pid launch "$launch_pid"
-  sleep 5
-  pid_alive "$launch_pid" || die "LIO launch exited"
-  transform_pid="$(find_descendant "$launch_pid" transform_everything || true)"
-  point_pid="$(find_descendant "$launch_pid" pointlio_mapping || true)"
-  adapter_pid="$(find_descendant "$launch_pid" odom_se2_adapter || true)"
-  [[ "$transform_pid" =~ ^[0-9]+$ ]] || die "transform process missing"
-  [[ "$point_pid" =~ ^[0-9]+$ ]] || die "pointlio process missing"
-  write_pid transform "$transform_pid"
-  write_pid pointlio "$point_pid"
-  [[ "$adapter_pid" =~ ^[0-9]+$ ]] || die "odom adapter process missing"
-  write_pid adapter "$adapter_pid"
-  ros2 node list 2>/dev/null | grep -q '^/sea_nav_sensor_transform$' || die "transform node missing"
-  ros2 node list 2>/dev/null | grep -q '^/sea_nav_lidar_deskew$' || die "deskew node missing"
-  ros2 node list 2>/dev/null | grep -q '^/sea_nav_point_lio$' || die "Point-LIO node missing"
-  check_rate /sea_nav/lio/transformed_imu 100 || die "TRANSFORM=FAIL transformed IMU"
-  check_rate /sea_nav/lio/deskewed_cloud 10 || die "DESKEW=FAIL deskew cloud"
+check_official_sensor_chain() {
+  say_red "[CHECK] Unitree official LiDAR localization"
   check_topic_ready_with_retry /utlidar/cloud_base 10 CLOUD_BASE_NOT_READY
   check_topic_ready_with_retry /utlidar/robot_odom 10 ROBOT_ODOM_NOT_READY
-  check_rate /sea_nav/lio/odom 5 || die "POINT_LIO=FAIL odom rate"
-  timeout 5s ros2 topic echo /sea_nav/lio/odom --once >"$LOG_ROOT/odom_once.log" 2>&1 || die "POINT_LIO=FAIL odom data"
-  TRANSFORM_STATUS=PASS
-  DESKEW_STATUS=PASS
-  POINT_LIO_STATUS=PASS
-  say_red "LIO_SENSOR_CHAIN=PASS"
+  timeout 5s ros2 topic echo /utlidar/robot_odom --once >"$LOG_ROOT/official_odom_once.log" 2>&1 \
+    || die "ROBOT_ODOM_NOT_READY"
+  grep -q 'frame_id: odom' "$LOG_ROOT/official_odom_once.log" \
+    || die "ROBOT_ODOM_NOT_READY frame_id"
+  grep -q 'child_frame_id: base_link' "$LOG_ROOT/official_odom_once.log" \
+    || die "ROBOT_ODOM_NOT_READY child_frame_id"
+  check_rate /utlidar/cloud_deskewed 10 || die "OFFICIAL_LIDAR=FAIL cloud_deskewed"
+  TRANSFORM_STATUS=OFFICIAL_NATIVE
+  DESKEW_STATUS=OFFICIAL_NATIVE
+  POINT_LIO_STATUS=NOT_USED_OFFICIAL
+  say_red "OFFICIAL_LIDAR_CHAIN=PASS"
 }
 
 start_monitors() {
-  say_red "[MONITOR] cloud / deskew / odom"
+  say_red "[MONITOR] official cloud / deskew / odom"
   ros2 topic hz /utlidar/cloud >"$LOG_ROOT/cloud_hz.log" 2>&1 &
   write_pid cloud_monitor "$!"
-  ros2 topic hz /sea_nav/lio/deskewed_cloud >"$LOG_ROOT/deskew_hz.log" 2>&1 &
+  ros2 topic hz /utlidar/cloud_deskewed >"$LOG_ROOT/deskew_hz.log" 2>&1 &
   write_pid deskew_monitor "$!"
-  ros2 topic hz /sea_nav/lio/odom >"$LOG_ROOT/odom_hz.log" 2>&1 &
+  ros2 topic hz /utlidar/robot_odom >"$LOG_ROOT/odom_hz.log" 2>&1 &
   write_pid odom_monitor "$!"
-  ros2 topic echo /sea_nav/lio/odom --qos-reliability reliable >"$RUN_ROOT/odom.jsonl" 2>&1 &
+  ros2 topic echo /utlidar/robot_odom --qos-reliability reliable >"$RUN_ROOT/odom.jsonl" 2>&1 &
   write_pid odom_echo "$!"
+  /usr/bin/python3 -m deploy.go2_onboard.diagnostics \
+    --duration 0 \
+    --report-interval 0.5 \
+    --max-sensor-age 0.25 \
+    --lowstate-topic /lowstate \
+    --lidar-topic /utlidar/cloud_base \
+    --odom-topic /utlidar/robot_odom \
+    --wireless-topic /wirelesscontroller \
+    --sport-state-topic rt/sportmodestate \
+    --goal-topic /sea_nav/goal2d \
+    --log "$RUN_ROOT/state_diagnostics.jsonl" \
+    >"$LOG_ROOT/state_diagnostics.stdout" 2>&1 &
+  write_pid state_diagnostics "$!"
 }
 
 start_navigation() {
@@ -335,6 +334,7 @@ start_navigation() {
     --navigation-log "$RUN_ROOT/navigation.log"
   )
   [[ -n "$GOAL_X" ]] && args+=(--goal-x "$GOAL_X" --goal-y "$GOAL_Y")
+  [[ -n "$FIXED_SPORT_VX" ]] && args+=(--fixed-sport-vx "$FIXED_SPORT_VX")
   ((ASSUME_CLEAR_LIDAR)) && args+=(--assume-clear-lidar)
   ((ENABLE_OFFICIAL_MOTION)) && args+=(--enable-motion)
   say_red "[START] SEA-Nav navigation + Unitree official Sport/MPC"
@@ -405,15 +405,21 @@ write_summary() {
   {
     printf 'CPU_STATUS=%s\nMCF_STATUS=%s\nRAW_SENSOR_STATUS=%s\n' "$CPU_STATUS" "$MCF_STATUS" "$RAW_SENSOR_STATUS"
     printf 'TRANSFORM_STATUS=%s\nDESKEW_STATUS=%s\nPOINT_LIO_STATUS=%s\n' "$TRANSFORM_STATUS" "$DESKEW_STATUS" "$POINT_LIO_STATUS"
-  printf 'LOCOMOTION_BACKEND=UNITREE_SPORT_MPC\nOFFICIAL_MOTION_ENABLED=%s\n' "$ENABLE_OFFICIAL_MOTION"
+    printf 'LOCOMOTION_BACKEND=UNITREE_SPORT_MPC\nOFFICIAL_MOTION_ENABLED=%s\n' "$ENABLE_OFFICIAL_MOTION"
+    if [[ -n "$FIXED_SPORT_VX" ]]; then
+      printf 'COMMAND_SOURCE=FIXED_SPORT_DIAGNOSTIC\nFIXED_SPORT_VX=%s\n' "$FIXED_SPORT_VX"
+    else
+      printf 'COMMAND_SOURCE=SEA_NAVIGATION\n'
+    fi
   printf 'POLICY_UNUSED_BY_SPORT_MPC=%s\nPOLICY_SHA256=%s\n' "$POLICY" "$policy_sha"
     printf 'NAVIGATION_POLICY=%s\nNAVIGATION_POLICY_SHA256=%s\nNAVIGATION_METADATA=%s\n' "$NAV_POLICY" "$nav_sha" "$NAV_METADATA"
     printf 'GOAL_X=%s\nGOAL_Y=%s\nFRONT_GOAL_DISTANCE=%s\nGOAL_TOLERANCE=%s\nNAVIGATION_VX_MAX=%s\nNAVIGATION_VY_MAX=%s\nASSUME_CLEAR_LIDAR=%s\n' "$GOAL_X" "$GOAL_Y" "$FRONT_GOAL_DISTANCE" "$GOAL_TOLERANCE" "$NAV_VX_MAX" "$NAV_VY_MAX" "$ASSUME_CLEAR_LIDAR"
-    printf 'LIDAR_RATE_HZ=%s\nDESKEW_RATE_HZ=%s\nODOM_RATE_HZ=%s\n' "$cloud_rate" "$deskew_rate" "$odom_rate"
+    printf 'LIDAR_RATE_HZ=%s\nOFFICIAL_DESKEW_RATE_HZ=%s\nROBOT_ODOM_RATE_HZ=%s\n' "$cloud_rate" "$deskew_rate" "$odom_rate"
+    printf 'STATE_DIAGNOSTICS=%s\n' "$RUN_ROOT/state_diagnostics.jsonl"
     [[ -f "$LOG_ROOT/motion_metrics.log" ]] && cat "$LOG_ROOT/motion_metrics.log" || printf 'MOTION_ODOM=NOT_AVAILABLE\n'
     printf 'NAVIGATION_STATUS=%s\nMOTION_STATUS=%s\n' "$NAVIGATION_STATUS" "$MOTION_STATUS"
     printf 'EXIT_REASON=%s\n' "$EXIT_REASON"
-    if [[ "$CPU_STATUS" == PASS && "$MCF_STATUS" == PASS && "$RAW_SENSOR_STATUS" == PASS && "$TRANSFORM_STATUS" == PASS && "$DESKEW_STATUS" == PASS && "$POINT_LIO_STATUS" == PASS && "$NAVIGATION_STATUS" != NOT_STARTED && "$NAVIGATION_STATUS" != FAIL ]]; then
+    if [[ "$CPU_STATUS" == PASS && "$MCF_STATUS" == PASS && "$RAW_SENSOR_STATUS" == PASS && "$TRANSFORM_STATUS" == OFFICIAL_NATIVE && "$DESKEW_STATUS" == OFFICIAL_NATIVE && "$POINT_LIO_STATUS" == NOT_USED_OFFICIAL && "$NAVIGATION_STATUS" != NOT_STARTED && "$NAVIGATION_STATUS" != FAIL ]]; then
       printf 'RESULT=PASS\n'
     else
       printf 'RESULT=FAIL\n'
@@ -426,6 +432,7 @@ cleanup() {
   ((CLEANED)) && return "$rc"
   CLEANED=1
   stop_pid ODOM_ECHO "$PID_ROOT/odom_echo.pid" INT || true
+  stop_pid STATE_DIAGNOSTICS "$PID_ROOT/state_diagnostics.pid" INT || true
   stop_pid ODOM_MONITOR "$PID_ROOT/odom_monitor.pid" INT || true
   stop_pid DESKEW_MONITOR "$PID_ROOT/deskew_monitor.pid" INT || true
   stop_pid CLOUD_MONITOR "$PID_ROOT/cloud_monitor.pid" INT || true
@@ -457,6 +464,7 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --front-goal-distance M    fix a goal M meters ahead of first odom pose
   --navigation-vx-max VALUE  forward safety limit, default 0.15
   --navigation-vy-max VALUE  lateral safety limit, default 0
+  --fixed-sport-vx VALUE      diagnostic fixed SportClient command, max 0.15
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --assume-clear-lidar       explicit no-obstacle-avoidance test mode
   --enable-official-motion   explicitly forward SEA-Nav commands to SportClient.Move
@@ -478,6 +486,7 @@ main() {
       --front-goal-distance) (($# >= 2)) || die "--front-goal-distance requires a value"; FRONT_GOAL_DISTANCE="$2"; shift 2 ;;
       --navigation-vx-max) (($# >= 2)) || die "--navigation-vx-max requires a value"; NAV_VX_MAX="$2"; shift 2 ;;
       --navigation-vy-max) (($# >= 2)) || die "--navigation-vy-max requires a value"; NAV_VY_MAX="$2"; shift 2 ;;
+      --fixed-sport-vx) (($# >= 2)) || die "--fixed-sport-vx requires a value"; FIXED_SPORT_VX="$2"; shift 2 ;;
       --goal-tolerance) (($# >= 2)) || die "--goal-tolerance requires a value"; GOAL_TOLERANCE="$2"; shift 2 ;;
       --assume-clear-lidar) ASSUME_CLEAR_LIDAR=1; shift ;;
       --enable-official-motion) ENABLE_OFFICIAL_MOTION=1; shift ;;
@@ -498,7 +507,7 @@ main() {
   check_cpu
   check_mcf
   start_sensor_bridge
-  start_lio
+  check_official_sensor_chain
   start_monitors
   start_navigation
   say_yellow "WAIT_FOR_POSE_ARM: manually Start, then A; press B for ESTOP"
