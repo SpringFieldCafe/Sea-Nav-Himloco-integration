@@ -8,7 +8,8 @@ ROOT="/home/hyz/桌面/sea_nav"
 LIO_WS="$ROOT/lio/sea_nav_lio_ws"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 UNITREE_SETUP="/home/hyz/unitree_msgs_humble_ws/install/setup.bash"
-LIO_SETUP="$LIO_WS/install_humble_clean/setup.bash"
+LIO_BASE_SETUP="$LIO_WS/install_humble_clean/setup.bash"
+LIO_SETUP="$LIO_WS/install_official_baseline/setup.bash"
 PYTHON="/home/hyz/anaconda3/envs/himloco/bin/python"
 NET="enp3s0"
 SOCKET="/tmp/sea_nav_shadow.sock"
@@ -75,6 +76,7 @@ source_ros() {
   set +u
   source "$ROS_SETUP"
   source "$UNITREE_SETUP"
+  source "$LIO_BASE_SETUP"
   source "$LIO_SETUP"
   set -u
 }

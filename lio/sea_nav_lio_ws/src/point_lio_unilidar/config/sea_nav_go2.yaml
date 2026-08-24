@@ -2,9 +2,10 @@
     ros__parameters:
         use_sim_time: false
         use_imu_as_input: false
+        init_map_size: 10
         runtime_pos_log_enable: false
         filter_size_surf: 0.1
-        filter_size_map: 0.5
+        filter_size_map: 0.1
         point_filter_num: 1
         common:
             lid_topic: "/sea_nav/lio/transformed_cloud"
@@ -25,7 +26,7 @@
             extrinsic_est_en: false
             # Point-LIO uses this only as the covariance propagation interval
             # when imu_en=false; keep it equal to the measured 249 Hz period.
-            imu_time_inte: 0.0040160643
+            imu_time_inte: 0.004
             satu_acc: 30.0
             satu_gyro: 35.0
             acc_norm: 9.81
