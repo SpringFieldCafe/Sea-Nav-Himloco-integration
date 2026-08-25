@@ -661,7 +661,7 @@ echo '[BRIDGE] READ-ONLY; lidar=/utlidar/cloud odom=/sea_nav/lio/odom_base'
 set +e
 $(quote "$PYTHON") -m deploy.go2_onboard.sensor_bridge \\
   --duration 0 --control-hz 50 --summary-interval 2 \\
-  --lowstate-max-age 0.10 --odom-max-age 0.10 --lidar-max-age 0.20 \\
+  --lowstate-max-age 0.10 --odom-max-age 0.20 --lidar-max-age 0.20 \\
   --lowstate-topic /lowstate --lidar-topic /utlidar/cloud \\
   --odom-topic /sea_nav/lio/odom_base --goal-topic '' __BRIDGE_GOAL_ARGS__ \\
   --socket /tmp/sea_nav_shadow.sock --log $(quote "$BRIDGE_LOG") \\
@@ -734,7 +734,7 @@ start_or_reuse_point() {
 }
 
 start_or_reuse_adapter() {
-  local pubs existing
+  local pubs existing pid
   pubs="$(publisher_count /sea_nav/lio/odom_base)"; [[ "$pubs" =~ ^[0-9]+$ ]] || pubs=0
   existing="$(component_pids odom_se2_adapter; ros2 node list 2>/dev/null | grep -qx /sea_nav_lio_odom_se2_adapter || true)"
   if (( pubs > 1 )); then die "ROOT_CAUSE=DUPLICATE_PUBLISHER (adapter)"; fi
@@ -742,6 +742,25 @@ start_or_reuse_adapter() {
     write_reused_status "$ADAPTER_STATUS" "$ADAPTER_LOG"
     say "EXISTING_PROCESS=HEALTHY adapter; reusing"
     return 0
+  fi
+  # point_lio_go2.launch.py historically starts its own adapter, but that
+  # instance publishes /utlidar/robot_odom.  This supervisor owns the
+  # calibrated /sea_nav/lio/odom_base adapter instead.  When Point-LIO was
+  # started by this run, remove the launch-owned incompatible adapter before
+  # starting the managed one; otherwise it would be reported as an unhealthy
+  # duplicate and the closed-loop launcher would stop unnecessarily.
+  if [[ -n "$existing" && "$POINT_LIO_STARTED" -eq 1 ]]; then
+    say "[STOP] launch-owned adapter with incompatible output topic"
+    while read -r pid; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      kill -TERM "$pid" 2>/dev/null || true
+    done < <(component_pids odom_se2_adapter)
+    sleep 1
+    while read -r pid; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      kill -KILL "$pid" 2>/dev/null || true
+    done < <(component_pids odom_se2_adapter)
+    existing="$(component_pids odom_se2_adapter; ros2 node list 2>/dev/null | grep -qx /sea_nav_lio_odom_se2_adapter || true)"
   fi
   [[ -z "$existing" ]] || die "ROOT_CAUSE=ADAPTER_FAILURE (unhealthy existing adapter)"
   say "[START] ADAPTER"

@@ -4,6 +4,7 @@ set -Eeuo pipefail
 # Single user entry for the guarded SEA-Nav + HIMLoco deployment.
 # The LIO selfcheck owns the MCF release gate and starts only read-only
 # preparation components.  This script never presses Start/A or sends motion.
+# It also owns stale-process cleanup and the complete shutdown lifecycle.
 
 REPO="/home/hyz/桌面/sea_nav"
 SELF_CHECK="$REPO/tools/go2_lio_selfcheck.sh"
@@ -15,7 +16,11 @@ SOCKET="/tmp/sea_nav_shadow.sock"
 NAV_MAX_AGE="0.25"
 NAV_FILTER_ALPHA="0.15"
 NAV_HZ="10"
-SENSOR_MAX_AGE="0.10"
+# LowState watchdog.  The SDK2 reader has shown isolated ~109 ms gaps; 150 ms
+# keeps the safety stop while avoiding a false stop on that single-frame hiccup.
+SENSOR_MAX_AGE="0.15"
+ODOM_MAX_AGE="0.20"
+GOAL_TOLERANCE="0.30"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 RUN_ID="$STAMP"
 RUN_ROOT="$REPO/logs/go2_nav_start/$RUN_ID"
@@ -42,6 +47,24 @@ CLEANUP_FAILED=0
 
 die() { printf '[NAV-START] ERROR: %s\n' "$*" >&2; exit 1; }
 say() { printf '[NAV-START] %s\n' "$*"; }
+
+# Keep logs plain while making the live robot-operation prompts impossible to
+# miss in an interactive terminal.
+if [[ -t 1 ]]; then
+  RED=$'\033[1;31m'
+  YELLOW=$'\033[1;33m'
+  GREEN=$'\033[1;32m'
+  RESET=$'\033[0m'
+else
+  RED=''
+  YELLOW=''
+  GREEN=''
+  RESET=''
+fi
+
+say_red() { printf '%s[NAV-START] %s%s\n' "$RED" "$*" "$RESET"; }
+say_yellow() { printf '%s[NAV-START] %s%s\n' "$YELLOW" "$*" "$RESET"; }
+say_green() { printf '%s[NAV-START] %s%s\n' "$GREEN" "$*" "$RESET"; }
 
 usage() {
   cat <<'EOF'
@@ -82,7 +105,6 @@ done
 
 [[ -x "$HIMLOCO_PYTHON" ]] || die "missing HIMLoco Python: $HIMLOCO_PYTHON"
 [[ -x "$SELF_CHECK" ]] || die "missing selfcheck: $SELF_CHECK"
-command -v gnome-terminal >/dev/null 2>&1 || die "gnome-terminal is required by the existing deployment entry"
 command -v ros2 >/dev/null 2>&1 || die "missing ros2"
 command -v timeout >/dev/null 2>&1 || die "missing timeout"
 
@@ -124,10 +146,35 @@ fi
 REQUESTED_GOAL_X="$GOAL_X"
 REQUESTED_GOAL_Y="$GOAL_Y"
 
-existing_selfcheck_supervisors() {
-  ps -eo pid=,args= | awk -v self="$$" '
-    $1 != self && $0 ~ /go2_lio_selfcheck\.sh/ {print}
-  '
+ancestor_pids() {
+  local pid="$$" parent
+  while [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 1)); do
+    printf '%s\n' "$pid"
+    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ "$parent" =~ ^[0-9]+$ && "$parent" != "$pid" ]] || break
+    pid="$parent"
+  done
+}
+
+kill_project_processes() {
+  local pattern="$1" signal="${2:-TERM}" pid cmd ancestors
+  ancestors="$(ancestor_pids | tr '\n' ' ')"
+  while read -r pid cmd; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ " $ancestors " == *" $pid "* ]] && continue
+    kill -"$signal" "$pid" 2>/dev/null || true
+  done < <(ps -eo pid=,args= | awk -v pattern="$pattern" '$0 ~ pattern {print}')
+}
+
+cleanup_old_processes() {
+  say "[0] stopping stale SEA-Nav/HIMLoco/LIO processes"
+  local pattern='go2_nav_start\.sh|go2_lio_selfcheck\.sh|go2_seanav_navigation_test\.sh|go2_full_stack_test\.sh|sea_nav_himloco_navigation|sea_nav_sport_navigation|himloco_fixed_control|sensor_bridge|transform_everything|deskew_node\.py|sea_nav_lidar_deskew|sea_nav_point_lio|pointlio_mapping|point_lio|odom_se2_adapter|ros2 launch.*sea_nav|component_container'
+  kill_project_processes "$pattern" TERM
+  sleep 3
+  kill_project_processes "$pattern" KILL
+  ros2 daemon stop >/dev/null 2>&1 || true
+  ros2 daemon start >/dev/null 2>&1 || true
+  sleep 1
 }
 
 resolve_repo_path() {
@@ -146,18 +193,7 @@ else
 fi
 [[ -f "$NAV_METADATA" ]] || die "missing navigation metadata: $NAV_METADATA"
 
-STALE_SELF_CHECKS="$(existing_selfcheck_supervisors || true)"
-if [[ -n "$STALE_SELF_CHECKS" ]]; then
-  say "STALE_SUPERVISOR: an existing selfcheck supervisor owns another run"
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    stale_pid="${line%% *}"
-    stale_cmd="${line#* }"
-    stale_root="$(printf '%s\n' "$stale_cmd" | grep -o '/logs/go2_lio_selfcheck/[^ ]*' | head -n 1 || true)"
-    say "STALE_SUPERVISOR_PID=$stale_pid RUN_ROOT=${stale_root:-UNKNOWN} CMD=$stale_cmd"
-  done <<<"$STALE_SELF_CHECKS"
-  die "STALE_SUPERVISOR (stop the listed selfcheck manually and rerun)"
-fi
+cleanup_old_processes
 
 HIM_SHA="$(sha256sum "$HIMLOCO" | awk '{print $1}')"
 case "$HIM_SHA" in
@@ -174,10 +210,6 @@ if [[ -n "$FORWARD" ]]; then
   SELF_CHECK_ARGS=(--forward "$FORWARD")
 else
   SELF_CHECK_ARGS=(--goal-x "$GOAL_X" --goal-y "$GOAL_Y")
-fi
-
-if pgrep -af 'deploy\.go2_onboard\.sea_nav_himloco_navigation' >/dev/null 2>&1; then
-  die "formal SEA-Nav process already exists; stop it manually before rerun"
 fi
 
 mkdir -p "$RUN_ROOT"
@@ -369,6 +401,11 @@ cleanup() {
   elif [[ -f "$SELF_LOG" ]] && grep -q 'CLEAN_SHUTDOWN=PASS' "$SELF_LOG"; then
     say "SELF_CHECK_CLEANUP=PASS"
   fi
+  # PID files cover this run; the final guarded sweep covers descendants or
+  # stale instances that failed before they could write their status file.
+  kill_project_processes 'go2_seanav_navigation_test\.sh|go2_full_stack_test\.sh|sea_nav_himloco_navigation|sea_nav_sport_navigation|himloco_fixed_control|sensor_bridge|transform_everything|deskew_node\.py|sea_nav_lidar_deskew|sea_nav_point_lio|pointlio_mapping|point_lio|odom_se2_adapter|ros2 launch.*sea_nav|component_container' TERM
+  sleep 1
+  kill_project_processes 'go2_seanav_navigation_test\.sh|go2_full_stack_test\.sh|sea_nav_himloco_navigation|sea_nav_sport_navigation|himloco_fixed_control|sensor_bridge|transform_everything|deskew_node\.py|sea_nav_lidar_deskew|sea_nav_point_lio|pointlio_mapping|point_lio|odom_se2_adapter|ros2 launch.*sea_nav|component_container' KILL
   if (( CLEANUP_FAILED == 0 )); then
     say "CLEAN_SHUTDOWN=PASS"
   else
@@ -430,7 +467,7 @@ for _ in $(seq 1 180); do
   selfcheck_running || selfcheck_early_exit
   SELF_ROOT="$(latest_selfcheck_root || true)"
   if [[ -n "$SELF_ROOT" ]] && selfcheck_ready "$SELF_ROOT"; then
-    say "MCF/LIO/adapter/sensor_bridge preparation PASS: $SELF_ROOT"
+say_green "MCF/LIO/adapter/sensor_bridge preparation PASS: $SELF_ROOT"
     break
   fi
   sleep 1
@@ -536,28 +573,45 @@ say "NAVIGATION_GOAL_X=$GOAL_X"
 say "NAVIGATION_GOAL_Y=$GOAL_Y"
 say "GOAL_CONTRACT=PASS"
 say "NAVIGATION_VX_MAX=$SPEED"
+say "GOAL_TOLERANCE=${GOAL_TOLERANCE}m ODOM_MAX_AGE=${ODOM_MAX_AGE}s"
 say "MCF=PASS"
 say "LIO=PASS"
 say "ADAPTER=PASS"
 say "BRIDGE=PASS"
 say "DRIFT_CHECK=$DRIFT_CHECK"
 say "DRIFT_GATE=WARNING_ONLY"
-say "READY_FOR_MANUAL_START=YES"
+say_green "READY_FOR_MANUAL_START=YES"
 
 NAV_TITLE="Go2 SEA-Nav + HIMLoco (manual Start/A; B=ESTOP)"
 NAV_COMMAND="cd $(printf '%q' "$REPO"); set +u; source /opt/ros/humble/setup.bash; source /home/hyz/unitree_msgs_humble_ws/install/setup.bash; set -u; export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; export ROS_DOMAIN_ID=0; export ROS_LOCALHOST_ONLY=0; export CYCLONEDDS_URI='<CycloneDDS><Domain Id=\"any\"><General><Interfaces><NetworkInterface name=\"enp3s0\" priority=\"default\" multicast=\"default\" /></Interfaces></General></Domain></CycloneDDS>'; printf '[NAV-START] preparation PASS; Start/A remain manual; B=ESTOP\\n'; set +e; $(printf '%q' "$HIMLOCO_PYTHON") -m deploy.go2_onboard.sea_nav_himloco_navigation enp3s0 --policy $(printf '%q' "$HIMLOCO") --vx 0 --vy 0 --wz 0 --goal-x $(printf '%q' "$GOAL_X") --goal-y $(printf '%q' "$GOAL_Y") --sensor-socket $(printf '%q' "$SOCKET") --navigation-policy $(printf '%q' "$NAV_POLICY") --navigation-metadata $(printf '%q' "$NAV_METADATA") --navigation-hz "$NAV_HZ" --navigation-command-max-age "$NAV_MAX_AGE" --navigation-filter-alpha "$NAV_FILTER_ALPHA" --navigation-vx-max "$SPEED" --hold-duration 0 --max-sensor-age "$SENSOR_MAX_AGE" --navigation-log $(printf '%q' "$NAV_LOG") --event-trace $(printf '%q' "$EVENT_TRACE") ${POLICY_OVERRIDE[*]-} & nav_pid=\$!; printf '%s\\n' \$nav_pid > $(printf '%q' "$NAV_PID_FILE"); wait \$nav_pid; rc=\$?; rm -f $(printf '%q' "$NAV_PID_FILE"); printf '[NAV-START] navigation exited rc=%s; no automatic restart\\n' "\$rc"; exit"
 
-gnome-terminal --title="$NAV_TITLE" -- bash -lc "$NAV_COMMAND"
+say_green "[START] SEA-Nav navigation + HIMLoco controller"
+say_yellow "准备完成：按遥控器 START，再按 A，才会进入运动控制"
+say_red "!!! 重要：请确认机器人周围安全后再按 START -> A；按 B 立即急停 !!!"
+set +e
+"$HIMLOCO_PYTHON" -m deploy.go2_onboard.sea_nav_himloco_navigation \
+  enp3s0 --policy "$HIMLOCO" --vx 0 --vy 0 --wz 0 \
+  --goal-x "$GOAL_X" --goal-y "$GOAL_Y" --sensor-socket "$SOCKET" \
+  --navigation-policy "$NAV_POLICY" --navigation-metadata "$NAV_METADATA" \
+  --navigation-hz "$NAV_HZ" --navigation-command-max-age "$NAV_MAX_AGE" \
+  --navigation-filter-alpha "$NAV_FILTER_ALPHA" --navigation-vx-max "$SPEED" \
+  --goal-tolerance "$GOAL_TOLERANCE" --odom-max-age "$ODOM_MAX_AGE" \
+  --hold-duration 0 --max-sensor-age "$SENSOR_MAX_AGE" \
+  --navigation-log "$NAV_LOG" --event-trace "$EVENT_TRACE" \
+  "${POLICY_OVERRIDE[@]}" >"$RUN_ROOT/navigation_himloco.log" 2>&1 &
+NAV_PROCESS_PID=$!
+printf '%s\n' "$NAV_PROCESS_PID" >"$NAV_PID_FILE"
+set -e
+printf 'FORMAL_NAVIGATION_PID=%s\n' "$NAV_PROCESS_PID" >>"$OWNERSHIP_FILE"
 for _ in $(seq 1 20); do
   [[ -s "$NAV_PID_FILE" ]] && break
   sleep 0.1
 done
-if [[ -s "$NAV_PID_FILE" ]]; then
-  printf 'FORMAL_NAVIGATION_PID=%s\n' "$(cat "$NAV_PID_FILE")" >>"$OWNERSHIP_FILE"
-else
-  say "[WARN] formal navigation PID file not observed yet: $NAV_PID_FILE"
-fi
-say "formal navigation terminal started; no Start/A was sent"
+say_green "HIMLoco/navigation process started pid=$NAV_PROCESS_PID; no Start/A was sent"
+say_red "!!! 现在等待人工按 START -> A；B=急停；Ctrl+C=结束并清理 !!!"
 say "selfcheck central supervisor remains active; logs: $RUN_ROOT"
 
-wait "$SELF_PIPE_PID" 2>/dev/null || true
+while kill -0 "$SELF_PIPE_PID" 2>/dev/null && kill -0 "$NAV_PROCESS_PID" 2>/dev/null; do
+  sleep 1
+done
+say "one of the managed processes exited; cleanup will now run"

@@ -43,7 +43,11 @@ CONTROL_DT = 1.0 / CONTROL_HZ
 POSE_TRANSITION_DURATION = 2.0
 POSE_KP = 40.0
 POSE_KD = 0.6
-STALE_MAX_AGE = 0.10
+# LowState normally arrives at a much higher rate than the 50 Hz control
+# loop.  A single SDK2 reader hiccup can nevertheless create a ~100 ms gap;
+# keep the fail-closed watchdog, but leave a small margin for that measured
+# transport jitter instead of stopping on the first boundary crossing.
+STALE_MAX_AGE = 0.15
 ARM_WAIT_TIMEOUT = 5.0
 ACTION_CLIP = 100.0
 ACTION_SCALE = 0.25

@@ -662,6 +662,10 @@ def build_parser():
     )
     parser.add_argument("--navigation-connect-timeout", type=float, default=10.0)
     parser.add_argument("--navigation-summary-interval", type=float, default=1.0)
+    parser.add_argument(
+        "--odom-max-age", type=float, default=0.10,
+        help="maximum odometry age before navigation forces a zero command",
+    )
     parser.add_argument("--assume-clear-lidar", action="store_true",
                         help="NO OBSTACLE AVOIDANCE: use 5m LiDAR rays")
     parser.add_argument(
@@ -688,8 +692,11 @@ def main(argv=None):
         raise SystemExit("provide both --goal-x and --goal-y, or neither")
     if args.front_goal_distance is not None and (args.goal_x is not None or args.goal_y is not None):
         raise SystemExit("front-goal-distance cannot be combined with goal-x/goal-y")
-    if args.navigation_command_max_age <= 0.0 or args.goal_tolerance <= 0.0:
-        raise SystemExit("navigation freshness and goal tolerance must be positive")
+    if (args.navigation_command_max_age <= 0.0 or args.goal_tolerance <= 0.0
+            or args.odom_max_age <= 0.0 or args.max_sensor_age <= 0.0):
+        raise SystemExit(
+            "navigation freshness, LowState age, odom age, and goal tolerance must be positive"
+        )
     if args.goal_reached_confirmations < 1:
         raise SystemExit("--goal-reached-confirmations must be positive")
     if (not np.isfinite(args.navigation_vx_max) and not np.isinf(args.navigation_vx_max)) or args.navigation_vx_max < 0.0:
@@ -723,6 +730,7 @@ def main(argv=None):
         f"vy=[-{args.navigation_vy_max:.6f},+{args.navigation_vy_max:.6f}] "
         "wz=unlimited"
     )
+    print(f"[safety] LOWSTATE_MAX_AGE={args.max_sensor_age:.3f}s")
 
     mailbox = NavigationMailbox(args.navigation_command_max_age)
     config = {
@@ -740,7 +748,7 @@ def main(argv=None):
         "goal_tolerance": args.goal_tolerance,
         "goal_reached_confirmations": args.goal_reached_confirmations,
         "lowstate_max_age": args.max_sensor_age,
-        "odom_max_age": 0.10,
+        "odom_max_age": args.odom_max_age,
         "lidar_max_age": 0.20,
         "assume_clear_lidar": args.assume_clear_lidar,
     }

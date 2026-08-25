@@ -159,7 +159,13 @@ class SensorBridge:
             linear = odom.linear_velocity
             odom_angular = odom.angular_velocity
             position = odom.position[:2]
-            yaw = quat_to_yaw(low_quaternion)
+            # Goal position and robot pose are both expressed by the odom
+            # stream.  Using the LowState IMU yaw here mixes two orientation
+            # conventions and can rotate a forward goal into the rear/side
+            # quadrant, which makes navigation turn in circles.  LowState
+            # remains the source for gravity/locomotion observations; odom is
+            # the sole source for the odom-frame goal transform.
+            yaw = quat_to_yaw(odom.orientation_quaternion)
             odom_frame = self._odom_frame(odom, latest_odom_frame)
         if (
             goal is None
