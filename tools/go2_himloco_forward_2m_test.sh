@@ -84,6 +84,7 @@ if [[ "$BACKEND" == official ]]; then
     --front-goal-distance 2.0 \
     --navigation-vx-max "$SPEED" \
     --goal-tolerance "$GOAL_TOLERANCE" \
+    --goal-slowdown-distance 0.50 \
     --enable-official-motion \
     --non-interactive
 fi

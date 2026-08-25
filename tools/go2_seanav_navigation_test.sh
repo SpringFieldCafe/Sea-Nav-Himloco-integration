@@ -29,6 +29,7 @@ NAV_VX_MAX=inf
 NAV_VY_MAX=0
 FIXED_SPORT_VX=""
 GOAL_TOLERANCE=0.15
+GOAL_SLOWDOWN_DISTANCE=0.50
 ASSUME_CLEAR_LIDAR=0
 ENABLE_OFFICIAL_MOTION=0
 NON_INTERACTIVE=0
@@ -335,6 +336,7 @@ start_navigation() {
     --navigation-vx-max "$NAV_VX_MAX"
     --navigation-vy-max "$NAV_VY_MAX"
     --goal-tolerance "$GOAL_TOLERANCE"
+    --goal-slowdown-distance "$GOAL_SLOWDOWN_DISTANCE"
     --navigation-log "$RUN_ROOT/navigation.log"
   )
   [[ -n "$GOAL_X" ]] && args+=(--goal-x "$GOAL_X" --goal-y "$GOAL_Y")
@@ -476,6 +478,7 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --navigation-vy-max VALUE  lateral speed limit, default 0
   --fixed-sport-vx VALUE      diagnostic fixed SportClient command, no speed cap
   --goal-tolerance VALUE     goal stop radius, default 0.15m
+  --goal-slowdown-distance M  start smooth forward braking, default 0.50m
   --assume-clear-lidar       explicit no-obstacle-avoidance test mode
   --enable-official-motion   explicitly forward SEA-Nav commands to SportClient.Move
   --non-interactive           skip the text START confirmation (for one-click wrapper)
@@ -501,6 +504,7 @@ main() {
       --navigation-vy-max) (($# >= 2)) || die "--navigation-vy-max requires a value"; NAV_VY_MAX="$2"; shift 2 ;;
       --fixed-sport-vx) (($# >= 2)) || die "--fixed-sport-vx requires a value"; FIXED_SPORT_VX="$2"; shift 2 ;;
       --goal-tolerance) (($# >= 2)) || die "--goal-tolerance requires a value"; GOAL_TOLERANCE="$2"; shift 2 ;;
+      --goal-slowdown-distance) (($# >= 2)) || die "--goal-slowdown-distance requires a value"; GOAL_SLOWDOWN_DISTANCE="$2"; shift 2 ;;
       --assume-clear-lidar) ASSUME_CLEAR_LIDAR=1; shift ;;
       --enable-official-motion) ENABLE_OFFICIAL_MOTION=1; shift ;;
       --non-interactive) NON_INTERACTIVE=1; shift ;;

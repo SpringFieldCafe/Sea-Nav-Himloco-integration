@@ -46,6 +46,8 @@ def build_parser():
     parser.add_argument("--goal-x", type=float)
     parser.add_argument("--goal-y", type=float)
     parser.add_argument("--goal-tolerance", type=float, default=0.15)
+    parser.add_argument("--goal-slowdown-distance", type=float, default=0.50,
+                        help="start smooth forward braking at this goal distance")
     parser.add_argument("--goal-reached-confirmations", type=int, default=5)
     parser.add_argument("--assume-clear-lidar", action="store_true")
     parser.add_argument("--max-sensor-age", type=float, default=0.10)
@@ -140,6 +142,8 @@ def main(argv=None):
         raise SystemExit("provide both --goal-x and --goal-y")
     if not 0.0 < args.navigation_hz <= 20.0:
         raise SystemExit("--navigation-hz must be in (0,20]")
+    if args.goal_slowdown_distance <= args.goal_tolerance:
+        raise SystemExit("--goal-slowdown-distance must be greater than --goal-tolerance")
     fixed_vx = args.fixed_sport_vx
     if fixed_vx is not None:
         if not np.isfinite(fixed_vx):
@@ -165,6 +169,7 @@ def main(argv=None):
         "goal_x": args.goal_x,
         "goal_y": args.goal_y,
         "goal_tolerance": args.goal_tolerance,
+        "goal_slowdown_distance": args.goal_slowdown_distance,
         "goal_reached_confirmations": args.goal_reached_confirmations,
         "lowstate_max_age": args.max_sensor_age,
         "odom_max_age": 0.10,

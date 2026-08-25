@@ -125,6 +125,22 @@ def goal_is_reached(goal_body: Sequence[float], tolerance: float) -> bool:
     return float(np.linalg.norm(goal)) <= float(tolerance)
 
 
+def goal_slowdown_scale(distance: float, tolerance: float, slowdown_distance: float) -> float:
+    """Smoothly reduce forward speed between slowdown and goal radii."""
+    distance = float(distance)
+    tolerance = float(tolerance)
+    slowdown_distance = float(slowdown_distance)
+    if not all(np.isfinite(value) for value in (distance, tolerance, slowdown_distance)):
+        raise ValueError("goal slowdown values must be finite")
+    if tolerance <= 0.0 or slowdown_distance <= tolerance:
+        raise ValueError("goal slowdown distance must be greater than goal tolerance")
+    if distance >= slowdown_distance:
+        return 1.0
+    if distance <= tolerance:
+        return 0.0
+    return float((distance - tolerance) / (slowdown_distance - tolerance))
+
+
 def _packet_is_fresh(packet, freshness):
     validity = packet.get("validity", {})
     if not all(validity.get(name, False) for name in ("lowstate", "lidar", "odom", "goal")):
@@ -157,8 +173,14 @@ def _navigation_result(
     })
     goal_body = np.asarray(packet.get("goal_body", [0.0, 0.0]), dtype=np.float32)
     distance = float(np.linalg.norm(goal_body))
+    tolerance = float(_navigation_arg(args, "goal_tolerance"))
+    slowdown_distance = float(
+        args.get("goal_slowdown_distance", 0.50)
+        if isinstance(args, dict) else getattr(args, "goal_slowdown_distance", 0.50)
+    )
+    slowdown_scale = goal_slowdown_scale(distance, tolerance, slowdown_distance)
     goal_candidate = fresh and goal_is_reached(
-        goal_body, _navigation_arg(args, "goal_tolerance")
+        goal_body, tolerance
     )
     confirmations = int(_navigation_arg(args, "goal_reached_confirmations"))
     if confirmations < 1:
@@ -172,6 +194,7 @@ def _navigation_result(
             "limited_command": [0.0, 0.0, 0.0],
             "goal_body": goal_body.tolist(),
             "goal_distance": distance,
+            "goal_slowdown_scale": 0.0,
             "runtime_state": "GOAL_REACHED",
             "fault_reason": "",
             "sea_observation_shape": [1, 550],
@@ -190,6 +213,7 @@ def _navigation_result(
             "limited_command": [0.0, 0.0, 0.0],
             "goal_body": goal_body.tolist(),
             "goal_distance": distance,
+            "goal_slowdown_scale": 0.0,
             "runtime_state": "STALE_NAVIGATION",
             "fault_reason": reason,
             "sea_observation_shape": None,
@@ -227,6 +251,9 @@ def _navigation_result(
     raw = infer(sea, observation, 3)[0].detach().cpu().numpy()
     inference_ms = (time.perf_counter() - inference_start) * 1000.0
     raw_command, limited, safe = limiter.apply(raw)
+    # Keep yaw correction available, but remove forward motion smoothly near
+    # the target instead of waiting for all goal confirmations at full speed.
+    safe[0] = np.float32(safe[0] * slowdown_scale)
     return {
         **source_metadata,
         "command": safe.tolist(),
@@ -234,6 +261,7 @@ def _navigation_result(
         "limited_command": limited.tolist(),
         "goal_body": goal_body.tolist(),
         "goal_distance": distance,
+        "goal_slowdown_scale": slowdown_scale,
         "runtime_state": "NAVIGATION",
         "fault_reason": "",
         "sea_observation_shape": list(observation.shape),
@@ -678,6 +706,7 @@ def build_parser():
     parser.add_argument("--goal-y", type=float)
     parser.add_argument("--front-goal-distance", type=float)
     parser.add_argument("--goal-tolerance", type=float, default=0.15)
+    parser.add_argument("--goal-slowdown-distance", type=float, default=0.50)
     parser.add_argument("--goal-reached-confirmations", type=int, default=5)
     return parser
 
@@ -699,6 +728,8 @@ def main(argv=None):
         )
     if args.goal_reached_confirmations < 1:
         raise SystemExit("--goal-reached-confirmations must be positive")
+    if args.goal_slowdown_distance <= args.goal_tolerance:
+        raise SystemExit("--goal-slowdown-distance must be greater than --goal-tolerance")
     if (not np.isfinite(args.navigation_vx_max) and not np.isinf(args.navigation_vx_max)) or args.navigation_vx_max < 0.0:
         raise SystemExit("--navigation-vx-max must be non-negative or inf")
     if (not np.isfinite(args.navigation_vy_max) and not np.isinf(args.navigation_vy_max)) or args.navigation_vy_max < 0.0:
@@ -721,6 +752,7 @@ def main(argv=None):
     else:
         print(f"[navigation] GOAL_WORLD=[{args.goal_x:.6f},{args.goal_y:.6f}] frame=odom")
     print(f"[navigation] GOAL_TOLERANCE={args.goal_tolerance:.3f}m")
+    print(f"[navigation] GOAL_SLOWDOWN_DISTANCE={args.goal_slowdown_distance:.3f}m")
     print(
         f"[navigation] GOAL_REACHED_CONFIRMATIONS={args.goal_reached_confirmations}"
     )
@@ -746,6 +778,7 @@ def main(argv=None):
         "summary_interval": args.navigation_summary_interval,
         "navigation_log": args.navigation_log,
         "goal_tolerance": args.goal_tolerance,
+        "goal_slowdown_distance": args.goal_slowdown_distance,
         "goal_reached_confirmations": args.goal_reached_confirmations,
         "lowstate_max_age": args.max_sensor_age,
         "odom_max_age": args.odom_max_age,
