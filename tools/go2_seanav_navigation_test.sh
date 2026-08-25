@@ -31,6 +31,7 @@ FIXED_SPORT_VX=""
 GOAL_TOLERANCE=0.15
 ASSUME_CLEAR_LIDAR=0
 ENABLE_OFFICIAL_MOTION=0
+NON_INTERACTIVE=0
 CLEANED=0
 SUMMARY_WRITTEN=0
 
@@ -343,8 +344,12 @@ start_navigation() {
   say_red "[START] SEA-Nav navigation + Unitree official Sport/MPC"
   if ((ENABLE_OFFICIAL_MOTION)); then
     say_red "WAIT_FOR_POSE_ARM: type START only after the robot is clear and already safely standing"
-    read -r -p "Type START to enable SportClient.Move, or Ctrl+C to abort: " confirmation
-    [[ "$confirmation" == START ]] || die "official motion not confirmed"
+    if ((NON_INTERACTIVE)); then
+      say_red "NON_INTERACTIVE=YES: proceeding with official SportClient.Move"
+    else
+      read -r -p "Type START to enable SportClient.Move, or Ctrl+C to abort: " confirmation
+      [[ "$confirmation" == START ]] || die "official motion not confirmed"
+    fi
   fi
   "$PYTHON" -m deploy.go2_onboard.sea_nav_sport_navigation \
     "${args[@]}" >"$RUN_ROOT/himloco.log" 2>&1 &
@@ -473,6 +478,7 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --assume-clear-lidar       explicit no-obstacle-avoidance test mode
   --enable-official-motion   explicitly forward SEA-Nav commands to SportClient.Move
+  --non-interactive           skip the text START confirmation (for one-click wrapper)
 EOF
 }
 
@@ -497,13 +503,16 @@ main() {
       --goal-tolerance) (($# >= 2)) || die "--goal-tolerance requires a value"; GOAL_TOLERANCE="$2"; shift 2 ;;
       --assume-clear-lidar) ASSUME_CLEAR_LIDAR=1; shift ;;
       --enable-official-motion) ENABLE_OFFICIAL_MOTION=1; shift ;;
+      --non-interactive) NON_INTERACTIVE=1; shift ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
-  if [[ -n "$FRONT_GOAL_DISTANCE" || -n "$FRONT_GOAL_FORWARD" || -n "$FRONT_GOAL_LEFT" ]]; then
+  if [[ -n "$FRONT_GOAL_DISTANCE" ]]; then
     [[ -z "$GOAL_X" && -z "$GOAL_Y" ]] || die "front goal cannot be combined with goal-x/goal-y"
-    [[ -z "$FRONT_GOAL_DISTANCE" || ( -z "$FRONT_GOAL_FORWARD" && -z "$FRONT_GOAL_LEFT" ) ]] || die "front goal distance cannot be combined with offsets"
+    [[ -z "$FRONT_GOAL_FORWARD" && -z "$FRONT_GOAL_LEFT" ]] || die "front goal distance cannot be combined with offsets"
+  elif [[ -n "$FRONT_GOAL_FORWARD" || -n "$FRONT_GOAL_LEFT" ]]; then
+    [[ -z "$GOAL_X" && -z "$GOAL_Y" ]] || die "front goal cannot be combined with goal-x/goal-y"
     [[ -n "$FRONT_GOAL_FORWARD" && -n "$FRONT_GOAL_LEFT" ]] || die "front-goal-forward and --front-goal-left must be used together"
   else
     [[ -n "$GOAL_X" && -n "$GOAL_Y" ]] || die "provide --goal-x/--goal-y or --front-goal-distance"
