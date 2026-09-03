@@ -28,6 +28,7 @@ THIRD_CAMERA_SIZE="${SEA_NAV_THIRD_CAMERA_SIZE:-1280x720}"
 THIRD_CAMERA_INPUT_FORMAT="${SEA_NAV_THIRD_CAMERA_INPUT_FORMAT:-yuyv422}"
 THIRD_CAMERA_FILE=""
 ENABLE_THIRD_CAMERA=0
+CAMERA_STOP_TIMEOUT=20
 FIRST_PERSON_VIDEO_STATUS=NOT_VALIDATED
 THIRD_PERSON_VIDEO_STATUS=NOT_ENABLED
 
@@ -106,25 +107,25 @@ write_pid() { printf '%s\n' "$2" >"$PID_ROOT/$1.pid"; }
 pid_alive() { kill -0 "$1" 2>/dev/null; }
 
 wait_dead() {
-  local pid="$1" deadline=$((SECONDS + 6))
+  local pid="$1" timeout="${2:-6}" deadline=$((SECONDS + timeout))
   while pid_alive "$pid" && ((SECONDS < deadline)); do sleep 0.2; done
   ! pid_alive "$pid"
 }
 
 stop_pid() {
-  local label="$1" file="$2" signal="${3:-INT}" pid
+  local label="$1" file="$2" signal="${3:-INT}" timeout="${4:-6}" pid
   [[ -f "$file" ]] || return 0
   pid="$(<"$file")"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 0
   pid_alive "$pid" || return 0
   say "[STOP] $label pid=$pid signal=$signal"
   kill -"$signal" "$pid" 2>/dev/null || true
-  if ! wait_dead "$pid"; then
+  if ! wait_dead "$pid" "$timeout"; then
     kill -TERM "$pid" 2>/dev/null || true
-    if ! wait_dead "$pid"; then
+    if ! wait_dead "$pid" "$timeout"; then
       fail "$label did not stop gracefully; escalating to SIGKILL pid=$pid"
       kill -KILL "$pid" 2>/dev/null || true
-      wait_dead "$pid" || true
+      wait_dead "$pid" "$timeout" || true
     fi
   fi
   pid_alive "$pid" && fail "${label}_STOP=FAIL" || pass "${label}_STOP=PASS"
@@ -408,10 +409,12 @@ start_third_camera_recording() {
   THIRD_CAMERA_FILE="$candidate"
   say_red "[START] third-person RGB recording: $THIRD_CAMERA_DEVICE -> $THIRD_CAMERA_FILE"
   ffmpeg -hide_banner -loglevel warning \
-    -f v4l2 -input_format "$THIRD_CAMERA_INPUT_FORMAT" \
+    -fflags +genpts -f v4l2 -timestamps abs \
+    -input_format "$THIRD_CAMERA_INPUT_FORMAT" \
     -framerate "$THIRD_CAMERA_FPS" -video_size "$THIRD_CAMERA_SIZE" \
-    -i "$THIRD_CAMERA_DEVICE" -an -c:v libx264 -preset ultrafast \
-    -pix_fmt yuv420p -movflags +faststart -progress "$LOG_ROOT/third_camera.progress" \
+    -i "$THIRD_CAMERA_DEVICE" -an -fps_mode cfr -c:v libx264 -preset ultrafast \
+    -pix_fmt yuv420p -avoid_negative_ts make_zero -movflags +faststart \
+    -progress "$LOG_ROOT/third_camera.progress" \
     "$THIRD_CAMERA_FILE" \
     >"$LOG_ROOT/third_camera.log" 2>&1 &
   write_pid third_camera "$!"
@@ -553,8 +556,13 @@ cleanup() {
   stop_pid DESKEW_MONITOR "$PID_ROOT/deskew_monitor.pid" INT || true
   stop_pid CLOUD_MONITOR "$PID_ROOT/cloud_monitor.pid" INT || true
   stop_pid NAVIGATION "$PID_ROOT/navigation.pid" INT || true
-  stop_pid FRONT_CAMERA "$PID_ROOT/front_camera.pid" INT || true
-  stop_pid THIRD_CAMERA "$PID_ROOT/third_camera.pid" INT || true
+  # Signal both encoders together so their capture windows end at the same time.
+  stop_pid FRONT_CAMERA "$PID_ROOT/front_camera.pid" INT "$CAMERA_STOP_TIMEOUT" &
+  local front_camera_stop_pid=$!
+  stop_pid THIRD_CAMERA "$PID_ROOT/third_camera.pid" INT "$CAMERA_STOP_TIMEOUT" &
+  local third_camera_stop_pid=$!
+  wait "$front_camera_stop_pid" || true
+  wait "$third_camera_stop_pid" || true
   if [[ -n "$FRONT_CAMERA_FILE" ]]; then
     validate_video_recording FIRST_PERSON_VIDEO "$FRONT_CAMERA_FILE" && FIRST_PERSON_VIDEO_STATUS=PASS || FIRST_PERSON_VIDEO_STATUS=FAIL
   fi
