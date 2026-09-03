@@ -17,7 +17,7 @@ RUN_ROOT="$ROOT/logs/go2_seanav_navigation/$(date +%Y%m%d_%H%M%S)"
 LOG_ROOT="$RUN_ROOT/logs"
 PID_ROOT="$RUN_ROOT/pids"
 FIRST_PERSON_DIR="$ROOT/first_person_view"
-FRONT_CAMERA_TOPIC="${SEA_NAV_FRONT_CAMERA_TOPIC:-/frontvideostream}"
+FRONT_CAMERA_NET="${SEA_NAV_FRONT_CAMERA_NET:-$NET}"
 FRONT_CAMERA_FPS="${SEA_NAV_FRONT_CAMERA_FPS:-30}"
 FRONT_CAMERA_SIZE="${SEA_NAV_FRONT_CAMERA_SIZE:-1280x720}"
 FRONT_CAMERA_FILE=""
@@ -377,19 +377,19 @@ start_front_camera_recording() {
     suffix=$((suffix + 1))
   done
   FRONT_CAMERA_FILE="$candidate"
-  say_red "[START] Go2 head front camera recording: $FRONT_CAMERA_TOPIC -> $FRONT_CAMERA_FILE"
-  /usr/bin/python3 "$ROOT/tools/go2_front_camera_recorder.py" \
-    --topic "$FRONT_CAMERA_TOPIC" --output "$FRONT_CAMERA_FILE" \
+  say_red "[START] Go2 head front camera recording via VideoClient: $FRONT_CAMERA_NET -> $FRONT_CAMERA_FILE"
+  "$PYTHON" "$ROOT/tools/go2_front_camera_recorder.py" \
+    --net "$FRONT_CAMERA_NET" --output "$FRONT_CAMERA_FILE" \
     --fps "$FRONT_CAMERA_FPS" --size "$FRONT_CAMERA_SIZE" \
     >"$LOG_ROOT/front_camera.log" 2>&1 &
   write_pid front_camera "$!"
   local deadline=$((SECONDS + 12))
   while ((SECONDS < deadline)); do
-    grep -Eq 'first (encoded )?frame received; (MP4|H264) recording started' "$LOG_ROOT/front_camera.log" && break
+    grep -Fq 'first frame received; H264 recording started' "$LOG_ROOT/front_camera.log" && break
     pid_alive "$(<"$PID_ROOT/front_camera.pid")" || die "FRONT_CAMERA=FAIL: recorder exited; see $LOG_ROOT/front_camera.log"
     sleep 0.5
   done
-  grep -Eq 'first (encoded )?frame received; (MP4|H264) recording started' "$LOG_ROOT/front_camera.log" \
+  grep -Fq 'first frame received; H264 recording started' "$LOG_ROOT/front_camera.log" \
     || die "FRONT_CAMERA=FAIL: no head-camera frames received; see $LOG_ROOT/front_camera.log"
   pass "FRONT_CAMERA=RECORDING"
 }
@@ -461,7 +461,7 @@ write_summary() {
     printf 'GOAL_X=%s\nGOAL_Y=%s\nFRONT_GOAL_DISTANCE=%s\nGOAL_TOLERANCE=%s\nNAVIGATION_VX_MIN=%s\nNAVIGATION_VX_MAX=%s\nNAVIGATION_VY_MAX=%s\nASSUME_CLEAR_LIDAR=%s\n' "$GOAL_X" "$GOAL_Y" "$FRONT_GOAL_DISTANCE" "$GOAL_TOLERANCE" "$NAV_VX_MIN" "$NAV_VX_MAX" "$NAV_VY_MAX" "$ASSUME_CLEAR_LIDAR"
     printf 'LIDAR_RATE_HZ=%s\nOFFICIAL_DESKEW_RATE_HZ=%s\nROBOT_ODOM_RATE_HZ=%s\n' "$cloud_rate" "$deskew_rate" "$odom_rate"
     printf 'STATE_DIAGNOSTICS=%s\n' "$RUN_ROOT/state_diagnostics.jsonl"
-    printf 'FIRST_PERSON_VIDEO=%s\nFRONT_CAMERA_TOPIC=%s\n' "$FRONT_CAMERA_FILE" "$FRONT_CAMERA_TOPIC"
+    printf 'FIRST_PERSON_VIDEO=%s\nFRONT_CAMERA_NET=%s\n' "$FRONT_CAMERA_FILE" "$FRONT_CAMERA_NET"
     [[ -f "$LOG_ROOT/motion_metrics.log" ]] && cat "$LOG_ROOT/motion_metrics.log" || printf 'MOTION_ODOM=NOT_AVAILABLE\n'
     printf 'NAVIGATION_STATUS=%s\nMOTION_STATUS=%s\n' "$NAVIGATION_STATUS" "$MOTION_STATUS"
     printf 'EXIT_REASON=%s\n' "$EXIT_REASON"
@@ -514,9 +514,9 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --navigation-vx-max VALUE  forward speed limit, default inf (disabled)
   --navigation-vx-min VALUE  reverse speed floor, default 0 (disabled)
   --navigation-vy-max VALUE  lateral speed limit, default 0
-  --front-camera-topic TOPIC  Go2 head front camera topic, default /frontvideostream
+  --front-camera-net IFACE     network interface connected to Go2, default enp3s0
   --front-camera-fps VALUE    front camera capture rate, default 30
-  --front-camera-size VALUE   V4L2 capture size, default 1280x720
+  --front-camera-size VALUE   saved video size, default 1280x720
   --fixed-sport-vx VALUE      diagnostic fixed SportClient command, no speed cap
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --goal-slowdown-distance M  start smooth forward braking, default 0.50m
@@ -544,7 +544,7 @@ main() {
       --navigation-vx-max) (($# >= 2)) || die "--navigation-vx-max requires a value"; NAV_VX_MAX="$2"; shift 2 ;;
       --navigation-vx-min) (($# >= 2)) || die "--navigation-vx-min requires a value"; NAV_VX_MIN="$2"; shift 2 ;;
       --navigation-vy-max) (($# >= 2)) || die "--navigation-vy-max requires a value"; NAV_VY_MAX="$2"; shift 2 ;;
-      --front-camera-topic) (($# >= 2)) || die "--front-camera-topic requires a value"; FRONT_CAMERA_TOPIC="$2"; shift 2 ;;
+      --front-camera-net) (($# >= 2)) || die "--front-camera-net requires a value"; FRONT_CAMERA_NET="$2"; shift 2 ;;
       --front-camera-fps) (($# >= 2)) || die "--front-camera-fps requires a value"; FRONT_CAMERA_FPS="$2"; shift 2 ;;
       --front-camera-size) (($# >= 2)) || die "--front-camera-size requires a value"; FRONT_CAMERA_SIZE="$2"; shift 2 ;;
       --fixed-sport-vx) (($# >= 2)) || die "--fixed-sport-vx requires a value"; FIXED_SPORT_VX="$2"; shift 2 ;;
