@@ -11,13 +11,13 @@ UNITREE_SETUP="/home/hyz/unitree_msgs_humble_ws/install/setup.bash"
 LIO_BASE_SETUP="$LIO_WS/install_humble_clean/setup.bash"
 LIO_SETUP="$LIO_WS/install_official_system/setup.bash"
 PYTHON="/home/hyz/anaconda3/envs/himloco/bin/python"
-NET="enp3s0"
+NET="${SEA_NAV_NET:-enp3s0}"
 SOCKET="/tmp/sea_nav_shadow.sock"
 RUN_ROOT="$ROOT/logs/go2_seanav_navigation/$(date +%Y%m%d_%H%M%S)"
 LOG_ROOT="$RUN_ROOT/logs"
 PID_ROOT="$RUN_ROOT/pids"
 FIRST_PERSON_DIR="$ROOT/first_person_view"
-FRONT_CAMERA_NET="${SEA_NAV_FRONT_CAMERA_NET:-$NET}"
+FRONT_CAMERA_NET="${SEA_NAV_FRONT_CAMERA_NET:-}"
 FRONT_CAMERA_FPS="${SEA_NAV_FRONT_CAMERA_FPS:-30}"
 FRONT_CAMERA_SIZE="${SEA_NAV_FRONT_CAMERA_SIZE:-1280x720}"
 FRONT_CAMERA_FILE=""
@@ -591,7 +591,8 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --navigation-vx-max VALUE  forward speed limit, default inf (disabled)
   --navigation-vx-min VALUE  reverse speed floor, default 0 (disabled)
   --navigation-vy-max VALUE  lateral speed limit, default 0
-  --front-camera-net IFACE     network interface connected to Go2, default enp3s0
+  --net IFACE                 network interface connected to Go2, default enp3s0
+  --front-camera-net IFACE    override network interface for Go2 head camera
   --front-camera-fps VALUE    front camera capture rate, default 30
   --front-camera-size VALUE   saved video size, default 1280x720
   --third-camera-device PATH  D435i RGB V4L2 device, default /dev/video6
@@ -626,6 +627,7 @@ main() {
       --navigation-vx-max) (($# >= 2)) || die "--navigation-vx-max requires a value"; NAV_VX_MAX="$2"; shift 2 ;;
       --navigation-vx-min) (($# >= 2)) || die "--navigation-vx-min requires a value"; NAV_VX_MIN="$2"; shift 2 ;;
       --navigation-vy-max) (($# >= 2)) || die "--navigation-vy-max requires a value"; NAV_VY_MAX="$2"; shift 2 ;;
+      --net) (($# >= 2)) || die "--net requires a value"; NET="$2"; shift 2 ;;
       --front-camera-net) (($# >= 2)) || die "--front-camera-net requires a value"; FRONT_CAMERA_NET="$2"; shift 2 ;;
       --front-camera-fps) (($# >= 2)) || die "--front-camera-fps requires a value"; FRONT_CAMERA_FPS="$2"; shift 2 ;;
       --front-camera-size) (($# >= 2)) || die "--front-camera-size requires a value"; FRONT_CAMERA_SIZE="$2"; shift 2 ;;
@@ -644,6 +646,7 @@ main() {
       *) die "unknown argument: $1" ;;
     esac
   done
+  [[ -n "$FRONT_CAMERA_NET" ]] || FRONT_CAMERA_NET="$NET"
   if [[ -n "$FRONT_GOAL_DISTANCE" ]]; then
     [[ -z "$GOAL_X" && -z "$GOAL_Y" ]] || die "front goal cannot be combined with goal-x/goal-y"
     [[ -z "$FRONT_GOAL_FORWARD" && -z "$FRONT_GOAL_LEFT" ]] || die "front goal distance cannot be combined with offsets"
