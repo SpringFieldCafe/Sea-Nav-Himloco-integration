@@ -34,7 +34,7 @@ class FrontCameraRecorder(Node):
             Go2FrontVideoData, topic, self.on_frame, 10
         )
         self.timeout_timer = self.create_timer(0.5, self.check_startup)
-        self.get_logger().info("recording %s to %s", topic, output)
+        self.get_logger().info(f"recording {topic} to {output}")
 
     def check_startup(self):
         if self.frames == 0 and time.monotonic() - self.started_at > self.startup_timeout:
@@ -67,7 +67,7 @@ class FrontCameraRecorder(Node):
     def close(self):
         if self.writer is not None:
             self.writer.release()
-        self.get_logger().info("saved %d frames to %s", self.frames, self.output)
+        self.get_logger().info(f"saved {self.frames} frames to {self.output}")
 
 
 def main(argv=None):
