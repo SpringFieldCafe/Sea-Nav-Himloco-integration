@@ -42,6 +42,8 @@ class FrontCameraRecorder:
     def record(self):
         startup_deadline = time.monotonic() + self.timeout
         recovery_deadline = None
+        next_frame_at = time.monotonic()
+        frame_period = 1.0 / self.fps
         while True:
             code, data = self.client.GetImageSample()
             if code != 0:
@@ -74,6 +76,15 @@ class FrontCameraRecorder:
             self.ffmpeg.stdin.write(image.tobytes())
             self.ffmpeg.stdin.flush()
             self.frames += 1
+            # VideoClient may return the latest image faster than the requested
+            # rate. Pace writes so MP4 duration follows wall-clock time instead
+            # of becoming longer because duplicate frames were over-sampled.
+            next_frame_at += frame_period
+            delay = next_frame_at - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_frame_at = time.monotonic()
 
     def close(self):
         if self.ffmpeg is not None:
