@@ -385,11 +385,11 @@ start_front_camera_recording() {
   write_pid front_camera "$!"
   local deadline=$((SECONDS + 12))
   while ((SECONDS < deadline)); do
-    grep -Fq 'first frame received; MP4 recording started' "$LOG_ROOT/front_camera.log" && break
+    grep -Eq 'first (encoded )?frame received; (MP4|H264) recording started' "$LOG_ROOT/front_camera.log" && break
     pid_alive "$(<"$PID_ROOT/front_camera.pid")" || die "FRONT_CAMERA=FAIL: recorder exited; see $LOG_ROOT/front_camera.log"
     sleep 0.5
   done
-  grep -Fq 'first frame received; MP4 recording started' "$LOG_ROOT/front_camera.log" \
+  grep -Eq 'first (encoded )?frame received; (MP4|H264) recording started' "$LOG_ROOT/front_camera.log" \
     || die "FRONT_CAMERA=FAIL: no head-camera frames received; see $LOG_ROOT/front_camera.log"
   pass "FRONT_CAMERA=RECORDING"
 }

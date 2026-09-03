@@ -4,6 +4,7 @@
 import argparse
 import re
 import sys
+import subprocess
 import time
 
 import cv2
@@ -27,6 +28,8 @@ class FrontCameraRecorder(Node):
         self.fps = fps
         self.width, self.height = size
         self.writer = None
+        self.ffmpeg = None
+        self.mode = None
         self.frames = 0
         self.started_at = time.monotonic()
         self.startup_timeout = startup_timeout
@@ -42,12 +45,17 @@ class FrontCameraRecorder(Node):
             rclpy.shutdown()
 
     def on_frame(self, message):
-        encoded = message.video720p or message.video360p or message.video180p
+        encoded = bytes(message.video720p or message.video360p or message.video180p)
         if not encoded:
+            return
+        if self.mode is None:
+            self.mode = "opencv" if encoded.startswith(b"\xff\xd8") else "h264"
+        if self.mode == "h264":
+            self.write_h264(encoded)
             return
         frame = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
-            self.get_logger().warning("OpenCV could not decode a Go2 camera frame")
+            self.get_logger().warning("OpenCV could not decode a JPEG camera frame")
             return
         if (frame.shape[1], frame.shape[0]) != (self.width, self.height):
             frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
@@ -64,10 +72,44 @@ class FrontCameraRecorder(Node):
         self.writer.write(frame)
         self.frames += 1
 
+    def write_h264(self, encoded):
+        if self.ffmpeg is None:
+            self.ffmpeg = subprocess.Popen(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "h264", "-framerate", str(self.fps), "-i", "pipe:0",
+                    "-an", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", self.output,
+                ],
+                stdin=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            self.get_logger().info("first encoded frame received; H264 recording started")
+        if self.ffmpeg.poll() is not None:
+            self.get_logger().error("FFmpeg exited while recording H264 stream")
+            rclpy.shutdown()
+            return
+        try:
+            self.ffmpeg.stdin.write(encoded)
+            self.ffmpeg.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self.get_logger().error("FFmpeg input pipe closed while recording")
+            rclpy.shutdown()
+            return
+        self.frames += 1
+
     def close(self):
         if self.writer is not None:
             self.writer.release()
-        self.get_logger().info(f"saved {self.frames} frames to {self.output}")
+        if self.ffmpeg is not None:
+            if self.ffmpeg.stdin is not None:
+                self.ffmpeg.stdin.close()
+            try:
+                self.ffmpeg.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.ffmpeg.kill()
+                self.ffmpeg.wait()
+        self.get_logger().info(f"saved {self.frames} encoded frames to {self.output}")
 
 
 def main(argv=None):
