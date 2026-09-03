@@ -21,6 +21,12 @@ FRONT_CAMERA_NET="${SEA_NAV_FRONT_CAMERA_NET:-$NET}"
 FRONT_CAMERA_FPS="${SEA_NAV_FRONT_CAMERA_FPS:-30}"
 FRONT_CAMERA_SIZE="${SEA_NAV_FRONT_CAMERA_SIZE:-1280x720}"
 FRONT_CAMERA_FILE=""
+THIRD_PERSON_DIR="$ROOT/third_person_view"
+THIRD_CAMERA_DEVICE="${SEA_NAV_THIRD_CAMERA_DEVICE:-/dev/video6}"
+THIRD_CAMERA_FPS="${SEA_NAV_THIRD_CAMERA_FPS:-30}"
+THIRD_CAMERA_SIZE="${SEA_NAV_THIRD_CAMERA_SIZE:-1280x720}"
+THIRD_CAMERA_INPUT_FORMAT="${SEA_NAV_THIRD_CAMERA_INPUT_FORMAT:-yuyv422}"
+THIRD_CAMERA_FILE=""
 
 POLICY="$ROOT/models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt"
 NAV_POLICY="$ROOT/artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt"
@@ -383,6 +389,32 @@ start_front_camera_recording() {
     --fps "$FRONT_CAMERA_FPS" --size "$FRONT_CAMERA_SIZE" \
     >"$LOG_ROOT/front_camera.log" 2>&1 &
   write_pid front_camera "$!"
+}
+
+start_third_camera_recording() {
+  command -v ffmpeg >/dev/null 2>&1 || die "THIRD_CAMERA=FAIL: ffmpeg is required"
+  [[ -e "$THIRD_CAMERA_DEVICE" ]] || die "THIRD_CAMERA=FAIL: device not found: $THIRD_CAMERA_DEVICE"
+  mkdir -p "$THIRD_PERSON_DIR"
+  local stamp candidate suffix=1
+  stamp="$(date +%Y%m%d_%H%M)"
+  candidate="$THIRD_PERSON_DIR/third_person_view_${stamp}.mp4"
+  while [[ -e "$candidate" ]]; do
+    candidate="$THIRD_PERSON_DIR/third_person_view_${stamp}_$(printf '%02d' "$suffix").mp4"
+    suffix=$((suffix + 1))
+  done
+  THIRD_CAMERA_FILE="$candidate"
+  say_red "[START] third-person RGB recording: $THIRD_CAMERA_DEVICE -> $THIRD_CAMERA_FILE"
+  ffmpeg -hide_banner -loglevel warning \
+    -f v4l2 -input_format "$THIRD_CAMERA_INPUT_FORMAT" \
+    -framerate "$THIRD_CAMERA_FPS" -video_size "$THIRD_CAMERA_SIZE" \
+    -i "$THIRD_CAMERA_DEVICE" -an -c:v libx264 -preset ultrafast \
+    -pix_fmt yuv420p -movflags +faststart -progress "$LOG_ROOT/third_camera.progress" \
+    "$THIRD_CAMERA_FILE" \
+    >"$LOG_ROOT/third_camera.log" 2>&1 &
+  write_pid third_camera "$!"
+}
+
+wait_for_camera_recordings() {
   local deadline=$((SECONDS + 12))
   while ((SECONDS < deadline)); do
     grep -Fq 'first frame received; H264 recording started' "$LOG_ROOT/front_camera.log" && break
@@ -392,6 +424,15 @@ start_front_camera_recording() {
   grep -Fq 'first frame received; H264 recording started' "$LOG_ROOT/front_camera.log" \
     || die "FRONT_CAMERA=FAIL: no head-camera frames received; see $LOG_ROOT/front_camera.log"
   pass "FRONT_CAMERA=RECORDING"
+  deadline=$((SECONDS + 12))
+  while ((SECONDS < deadline)); do
+    grep -Eq '^frame=[1-9][0-9]*$' "$LOG_ROOT/third_camera.progress" && break
+    pid_alive "$(<"$PID_ROOT/third_camera.pid")" || die "THIRD_CAMERA=FAIL: recorder exited; see $LOG_ROOT/third_camera.log"
+    sleep 0.5
+  done
+  grep -Eq '^frame=[1-9][0-9]*$' "$LOG_ROOT/third_camera.progress" \
+    || die "THIRD_CAMERA=FAIL: no RGB frames received; see $LOG_ROOT/third_camera.log"
+  pass "THIRD_CAMERA=RECORDING"
 }
 
 record_exit_reason() {
@@ -462,6 +503,7 @@ write_summary() {
     printf 'LIDAR_RATE_HZ=%s\nOFFICIAL_DESKEW_RATE_HZ=%s\nROBOT_ODOM_RATE_HZ=%s\n' "$cloud_rate" "$deskew_rate" "$odom_rate"
     printf 'STATE_DIAGNOSTICS=%s\n' "$RUN_ROOT/state_diagnostics.jsonl"
     printf 'FIRST_PERSON_VIDEO=%s\nFRONT_CAMERA_NET=%s\n' "$FRONT_CAMERA_FILE" "$FRONT_CAMERA_NET"
+    printf 'THIRD_PERSON_VIDEO=%s\nTHIRD_CAMERA_DEVICE=%s\nTHIRD_CAMERA_INPUT_FORMAT=%s\n' "$THIRD_CAMERA_FILE" "$THIRD_CAMERA_DEVICE" "$THIRD_CAMERA_INPUT_FORMAT"
     [[ -f "$LOG_ROOT/motion_metrics.log" ]] && cat "$LOG_ROOT/motion_metrics.log" || printf 'MOTION_ODOM=NOT_AVAILABLE\n'
     printf 'NAVIGATION_STATUS=%s\nMOTION_STATUS=%s\n' "$NAVIGATION_STATUS" "$MOTION_STATUS"
     printf 'EXIT_REASON=%s\n' "$EXIT_REASON"
@@ -484,6 +526,7 @@ cleanup() {
   stop_pid CLOUD_MONITOR "$PID_ROOT/cloud_monitor.pid" INT || true
   stop_pid NAVIGATION "$PID_ROOT/navigation.pid" INT || true
   stop_pid FRONT_CAMERA "$PID_ROOT/front_camera.pid" INT || true
+  stop_pid THIRD_CAMERA "$PID_ROOT/third_camera.pid" INT || true
   stop_pid ODOM_ADAPTER "$PID_ROOT/adapter.pid" INT || true
   stop_pid POINT_LIO "$PID_ROOT/pointlio.pid" INT || true
   stop_pid TRANSFORM "$PID_ROOT/transform.pid" INT || true
@@ -517,6 +560,10 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --front-camera-net IFACE     network interface connected to Go2, default enp3s0
   --front-camera-fps VALUE    front camera capture rate, default 30
   --front-camera-size VALUE   saved video size, default 1280x720
+  --third-camera-device PATH  D435i RGB V4L2 device, default /dev/video6
+  --third-camera-fps VALUE    third-person capture rate, default 30
+  --third-camera-size VALUE   third-person video size, default 1280x720
+  --third-camera-format NAME  third-person V4L2 input format, default yuyv422
   --fixed-sport-vx VALUE      diagnostic fixed SportClient command, no speed cap
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --goal-slowdown-distance M  start smooth forward braking, default 0.50m
@@ -547,6 +594,10 @@ main() {
       --front-camera-net) (($# >= 2)) || die "--front-camera-net requires a value"; FRONT_CAMERA_NET="$2"; shift 2 ;;
       --front-camera-fps) (($# >= 2)) || die "--front-camera-fps requires a value"; FRONT_CAMERA_FPS="$2"; shift 2 ;;
       --front-camera-size) (($# >= 2)) || die "--front-camera-size requires a value"; FRONT_CAMERA_SIZE="$2"; shift 2 ;;
+      --third-camera-device) (($# >= 2)) || die "--third-camera-device requires a value"; THIRD_CAMERA_DEVICE="$2"; shift 2 ;;
+      --third-camera-fps) (($# >= 2)) || die "--third-camera-fps requires a value"; THIRD_CAMERA_FPS="$2"; shift 2 ;;
+      --third-camera-size) (($# >= 2)) || die "--third-camera-size requires a value"; THIRD_CAMERA_SIZE="$2"; shift 2 ;;
+      --third-camera-format) (($# >= 2)) || die "--third-camera-format requires a value"; THIRD_CAMERA_INPUT_FORMAT="$2"; shift 2 ;;
       --fixed-sport-vx) (($# >= 2)) || die "--fixed-sport-vx requires a value"; FIXED_SPORT_VX="$2"; shift 2 ;;
       --goal-tolerance) (($# >= 2)) || die "--goal-tolerance requires a value"; GOAL_TOLERANCE="$2"; shift 2 ;;
       --goal-slowdown-distance) (($# >= 2)) || die "--goal-slowdown-distance requires a value"; GOAL_SLOWDOWN_DISTANCE="$2"; shift 2 ;;
@@ -576,6 +627,8 @@ main() {
   start_sensor_bridge
   check_official_sensor_chain
   start_front_camera_recording
+  start_third_camera_recording
+  wait_for_camera_recordings
   start_monitors
   start_navigation
   say_yellow "WAIT_FOR_POSE_ARM: manually Start, then A; press B for ESTOP"
