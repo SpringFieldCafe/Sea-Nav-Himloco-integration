@@ -16,6 +16,11 @@ SOCKET="/tmp/sea_nav_shadow.sock"
 RUN_ROOT="$ROOT/logs/go2_seanav_navigation/$(date +%Y%m%d_%H%M%S)"
 LOG_ROOT="$RUN_ROOT/logs"
 PID_ROOT="$RUN_ROOT/pids"
+FIRST_PERSON_DIR="$ROOT/first_person_view"
+FRONT_CAMERA_DEVICE="${SEA_NAV_FRONT_CAMERA_DEVICE:-/dev/video0}"
+FRONT_CAMERA_FPS="${SEA_NAV_FRONT_CAMERA_FPS:-30}"
+FRONT_CAMERA_SIZE="${SEA_NAV_FRONT_CAMERA_SIZE:-1280x720}"
+FRONT_CAMERA_FILE=""
 
 POLICY="$ROOT/models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt"
 NAV_POLICY="$ROOT/artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt"
@@ -26,6 +31,7 @@ FRONT_GOAL_DISTANCE=""
 FRONT_GOAL_FORWARD=""
 FRONT_GOAL_LEFT=""
 NAV_VX_MAX=inf
+NAV_VX_MIN=0
 NAV_VY_MAX=0
 FIXED_SPORT_VX=""
 GOAL_TOLERANCE=0.15
@@ -334,6 +340,7 @@ start_navigation() {
     --navigation-policy "$NAV_POLICY"
     --navigation-metadata "$NAV_METADATA"
     --navigation-vx-max "$NAV_VX_MAX"
+    --navigation-vx-min "$NAV_VX_MIN"
     --navigation-vy-max "$NAV_VY_MAX"
     --goal-tolerance "$GOAL_TOLERANCE"
     --goal-slowdown-distance "$GOAL_SLOWDOWN_DISTANCE"
@@ -357,6 +364,29 @@ start_navigation() {
     "${args[@]}" >"$RUN_ROOT/himloco.log" 2>&1 &
   write_pid navigation "$!"
   NAVIGATION_STATUS=RUNNING
+}
+
+start_front_camera_recording() {
+  command -v ffmpeg >/dev/null 2>&1 || die "FRONT_CAMERA=FAIL: ffmpeg is required"
+  [[ -e "$FRONT_CAMERA_DEVICE" ]] || die "FRONT_CAMERA=FAIL: device not found: $FRONT_CAMERA_DEVICE"
+  mkdir -p "$FIRST_PERSON_DIR"
+  local stamp candidate suffix=1
+  stamp="$(date +%Y%m%d_%H%M)"
+  candidate="$FIRST_PERSON_DIR/first_person_view_${stamp}.mp4"
+  while [[ -e "$candidate" ]]; do
+    candidate="$FIRST_PERSON_DIR/first_person_view_${stamp}_$(printf '%02d' "$suffix").mp4"
+    suffix=$((suffix + 1))
+  done
+  FRONT_CAMERA_FILE="$candidate"
+  say_red "[START] front camera recording: $FRONT_CAMERA_DEVICE -> $FRONT_CAMERA_FILE"
+  ffmpeg -hide_banner -loglevel warning \
+    -f v4l2 -framerate "$FRONT_CAMERA_FPS" -video_size "$FRONT_CAMERA_SIZE" \
+    -i "$FRONT_CAMERA_DEVICE" -an -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+    -movflags +faststart "$FRONT_CAMERA_FILE" >"$LOG_ROOT/front_camera.log" 2>&1 &
+  write_pid front_camera "$!"
+  sleep 1
+  pid_alive "$(<"$PID_ROOT/front_camera.pid")" || die "FRONT_CAMERA=FAIL: recorder exited"
+  pass "FRONT_CAMERA=RECORDING"
 }
 
 record_exit_reason() {
@@ -423,9 +453,10 @@ write_summary() {
     fi
   printf 'POLICY_UNUSED_BY_SPORT_MPC=%s\nPOLICY_SHA256=%s\n' "$POLICY" "$policy_sha"
     printf 'NAVIGATION_POLICY=%s\nNAVIGATION_POLICY_SHA256=%s\nNAVIGATION_METADATA=%s\n' "$NAV_POLICY" "$nav_sha" "$NAV_METADATA"
-    printf 'GOAL_X=%s\nGOAL_Y=%s\nFRONT_GOAL_DISTANCE=%s\nGOAL_TOLERANCE=%s\nNAVIGATION_VX_MAX=%s\nNAVIGATION_VY_MAX=%s\nASSUME_CLEAR_LIDAR=%s\n' "$GOAL_X" "$GOAL_Y" "$FRONT_GOAL_DISTANCE" "$GOAL_TOLERANCE" "$NAV_VX_MAX" "$NAV_VY_MAX" "$ASSUME_CLEAR_LIDAR"
+    printf 'GOAL_X=%s\nGOAL_Y=%s\nFRONT_GOAL_DISTANCE=%s\nGOAL_TOLERANCE=%s\nNAVIGATION_VX_MIN=%s\nNAVIGATION_VX_MAX=%s\nNAVIGATION_VY_MAX=%s\nASSUME_CLEAR_LIDAR=%s\n' "$GOAL_X" "$GOAL_Y" "$FRONT_GOAL_DISTANCE" "$GOAL_TOLERANCE" "$NAV_VX_MIN" "$NAV_VX_MAX" "$NAV_VY_MAX" "$ASSUME_CLEAR_LIDAR"
     printf 'LIDAR_RATE_HZ=%s\nOFFICIAL_DESKEW_RATE_HZ=%s\nROBOT_ODOM_RATE_HZ=%s\n' "$cloud_rate" "$deskew_rate" "$odom_rate"
     printf 'STATE_DIAGNOSTICS=%s\n' "$RUN_ROOT/state_diagnostics.jsonl"
+    printf 'FIRST_PERSON_VIDEO=%s\nFRONT_CAMERA_DEVICE=%s\n' "$FRONT_CAMERA_FILE" "$FRONT_CAMERA_DEVICE"
     [[ -f "$LOG_ROOT/motion_metrics.log" ]] && cat "$LOG_ROOT/motion_metrics.log" || printf 'MOTION_ODOM=NOT_AVAILABLE\n'
     printf 'NAVIGATION_STATUS=%s\nMOTION_STATUS=%s\n' "$NAVIGATION_STATUS" "$MOTION_STATUS"
     printf 'EXIT_REASON=%s\n' "$EXIT_REASON"
@@ -447,6 +478,7 @@ cleanup() {
   stop_pid DESKEW_MONITOR "$PID_ROOT/deskew_monitor.pid" INT || true
   stop_pid CLOUD_MONITOR "$PID_ROOT/cloud_monitor.pid" INT || true
   stop_pid NAVIGATION "$PID_ROOT/navigation.pid" INT || true
+  stop_pid FRONT_CAMERA "$PID_ROOT/front_camera.pid" INT || true
   stop_pid ODOM_ADAPTER "$PID_ROOT/adapter.pid" INT || true
   stop_pid POINT_LIO "$PID_ROOT/pointlio.pid" INT || true
   stop_pid TRANSFORM "$PID_ROOT/transform.pid" INT || true
@@ -475,7 +507,11 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --front-goal-forward M     fix a goal M meters forward from first pose
   --front-goal-left M        fix a goal M meters left from first pose
   --navigation-vx-max VALUE  forward speed limit, default inf (disabled)
+  --navigation-vx-min VALUE  reverse speed floor, default 0 (disabled)
   --navigation-vy-max VALUE  lateral speed limit, default 0
+  --front-camera-device PATH  Go2 front camera V4L2 device, default /dev/video0
+  --front-camera-fps VALUE    front camera capture rate, default 30
+  --front-camera-size VALUE   V4L2 capture size, default 1280x720
   --fixed-sport-vx VALUE      diagnostic fixed SportClient command, no speed cap
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --goal-slowdown-distance M  start smooth forward braking, default 0.50m
@@ -501,7 +537,11 @@ main() {
       --front-goal-forward) (($# >= 2)) || die "--front-goal-forward requires a value"; FRONT_GOAL_FORWARD="$2"; shift 2 ;;
       --front-goal-left) (($# >= 2)) || die "--front-goal-left requires a value"; FRONT_GOAL_LEFT="$2"; shift 2 ;;
       --navigation-vx-max) (($# >= 2)) || die "--navigation-vx-max requires a value"; NAV_VX_MAX="$2"; shift 2 ;;
+      --navigation-vx-min) (($# >= 2)) || die "--navigation-vx-min requires a value"; NAV_VX_MIN="$2"; shift 2 ;;
       --navigation-vy-max) (($# >= 2)) || die "--navigation-vy-max requires a value"; NAV_VY_MAX="$2"; shift 2 ;;
+      --front-camera-device) (($# >= 2)) || die "--front-camera-device requires a value"; FRONT_CAMERA_DEVICE="$2"; shift 2 ;;
+      --front-camera-fps) (($# >= 2)) || die "--front-camera-fps requires a value"; FRONT_CAMERA_FPS="$2"; shift 2 ;;
+      --front-camera-size) (($# >= 2)) || die "--front-camera-size requires a value"; FRONT_CAMERA_SIZE="$2"; shift 2 ;;
       --fixed-sport-vx) (($# >= 2)) || die "--fixed-sport-vx requires a value"; FIXED_SPORT_VX="$2"; shift 2 ;;
       --goal-tolerance) (($# >= 2)) || die "--goal-tolerance requires a value"; GOAL_TOLERANCE="$2"; shift 2 ;;
       --goal-slowdown-distance) (($# >= 2)) || die "--goal-slowdown-distance requires a value"; GOAL_SLOWDOWN_DISTANCE="$2"; shift 2 ;;
@@ -530,6 +570,7 @@ main() {
   check_mcf
   start_sensor_bridge
   check_official_sensor_chain
+  start_front_camera_recording
   start_monitors
   start_navigation
   say_yellow "WAIT_FOR_POSE_ARM: manually Start, then A; press B for ESTOP"

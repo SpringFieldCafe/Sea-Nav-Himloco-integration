@@ -86,21 +86,26 @@ class NavigationLimiter:
     """Limit navigation velocity commands for an explicit test profile."""
 
     def __init__(self, filter_alpha: float = 0.15, vx_max: float = NAV_VX_MAX,
-                 vy_max: float = 0.0):
+                 vy_max: float = 0.0, vx_min: float = 0.0):
         vx_max = float(vx_max)
         vy_max = float(vy_max)
+        vx_min = float(vx_min)
         if not np.isfinite(vx_max) and not np.isinf(vx_max):
             raise ValueError("navigation vx max must be non-negative")
         if not np.isfinite(vy_max) and not np.isinf(vy_max):
             raise ValueError("navigation vy max must be non-negative")
-        if vx_max < 0.0 or vy_max < 0.0:
+        if not np.isfinite(vx_min) or vx_min > vx_max:
+            raise ValueError("navigation vx min must be finite and <= vx max")
+        if vy_max < 0.0:
             raise ValueError("navigation velocity limits must be non-negative")
         upper = NAV_UPPER.copy()
         upper[0] = vx_max
         lower = NAV_LOWER.copy()
+        lower[0] = vx_min
         lower[1] = -vy_max
         upper[1] = vy_max
         self.vx_max = vx_max
+        self.vx_min = vx_min
         self.vy_max = vy_max
         self.bridge = ReadOnlyCommandBridge(lower, upper, filter_alpha)
         self.lower = lower
@@ -290,7 +295,7 @@ def _navigation_worker_main(config, sender, stop_event):
         nav_obs = NavigationObservation(torch.device("cpu"))
         limiter = NavigationLimiter(
             config["command_filter_alpha"], config["navigation_vx_max"],
-            config["navigation_vy_max"],
+            config["navigation_vy_max"], config.get("navigation_vx_min", 0.0),
         )
         previous_command = np.zeros(3, dtype=np.float32)
         reached = False
@@ -683,6 +688,12 @@ def build_parser():
         help="navigation forward-vx upper bound in m/s; inf disables the speed limit",
     )
     parser.add_argument(
+        "--navigation-vx-min",
+        type=float,
+        default=0.0,
+        help="navigation forward-vx lower bound; negative enables bounded reverse",
+    )
+    parser.add_argument(
         "--navigation-vy-max",
         type=float,
         default=0.0,
@@ -732,6 +743,8 @@ def main(argv=None):
         raise SystemExit("--goal-slowdown-distance must be greater than --goal-tolerance")
     if (not np.isfinite(args.navigation_vx_max) and not np.isinf(args.navigation_vx_max)) or args.navigation_vx_max < 0.0:
         raise SystemExit("--navigation-vx-max must be non-negative or inf")
+    if not np.isfinite(args.navigation_vx_min) or args.navigation_vx_min > args.navigation_vx_max:
+        raise SystemExit("--navigation-vx-min must be finite and <= --navigation-vx-max")
     if (not np.isfinite(args.navigation_vy_max) and not np.isinf(args.navigation_vy_max)) or args.navigation_vy_max < 0.0:
         raise SystemExit("--navigation-vy-max must be non-negative or inf")
     # The fixed controller parser is reused for its transport/safety options.
@@ -758,7 +771,7 @@ def main(argv=None):
     )
     print(
         "[safety] NAVIGATION_SAFETY_PROFILE "
-        f"vx=[0,{args.navigation_vx_max:.6f}] "
+        f"vx=[{args.navigation_vx_min:.6f},{args.navigation_vx_max:.6f}] "
         f"vy=[-{args.navigation_vy_max:.6f},+{args.navigation_vy_max:.6f}] "
         "wz=unlimited"
     )
@@ -773,6 +786,7 @@ def main(argv=None):
         "navigation_command_max_age": args.navigation_command_max_age,
         "command_filter_alpha": args.navigation_filter_alpha,
         "navigation_vx_max": args.navigation_vx_max,
+        "navigation_vx_min": args.navigation_vx_min,
         "navigation_vy_max": args.navigation_vy_max,
         "connect_timeout": args.navigation_connect_timeout,
         "summary_interval": args.navigation_summary_interval,

@@ -35,6 +35,8 @@ def build_parser():
     parser.add_argument("--navigation-metadata", default=DEFAULT_NAVIGATION_METADATA)
     parser.add_argument("--navigation-log", required=True)
     parser.add_argument("--navigation-vx-max", type=float, default=float("inf"))
+    parser.add_argument("--navigation-vx-min", type=float, default=0.0,
+                        help="minimum forward velocity; negative enables bounded reverse")
     parser.add_argument("--fixed-sport-vx", type=float, default=None,
                         help="diagnostic fixed SportClient vx; no software speed cap")
     parser.add_argument("--navigation-vy-max", type=float, default=0.0)
@@ -144,6 +146,8 @@ def main(argv=None):
         raise SystemExit("--navigation-hz must be in (0,20]")
     if args.goal_slowdown_distance <= args.goal_tolerance:
         raise SystemExit("--goal-slowdown-distance must be greater than --goal-tolerance")
+    if not np.isfinite(args.navigation_vx_min) or args.navigation_vx_min > args.navigation_vx_max:
+        raise SystemExit("--navigation-vx-min must be finite and <= --navigation-vx-max")
     fixed_vx = args.fixed_sport_vx
     if fixed_vx is not None:
         if not np.isfinite(fixed_vx):
@@ -162,6 +166,7 @@ def main(argv=None):
         "navigation_command_max_age": args.navigation_command_max_age,
         "command_filter_alpha": args.navigation_filter_alpha,
         "navigation_vx_max": args.navigation_vx_max,
+        "navigation_vx_min": args.navigation_vx_min,
         "navigation_vy_max": args.navigation_vy_max,
         "connect_timeout": args.navigation_connect_timeout,
         "summary_interval": args.navigation_summary_interval,
