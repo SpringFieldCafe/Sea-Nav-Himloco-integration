@@ -412,7 +412,7 @@ start_third_camera_recording() {
     -fflags +genpts -f v4l2 -timestamps abs \
     -input_format "$THIRD_CAMERA_INPUT_FORMAT" \
     -framerate "$THIRD_CAMERA_FPS" -video_size "$THIRD_CAMERA_SIZE" \
-    -i "$THIRD_CAMERA_DEVICE" -an -fps_mode cfr -c:v libx264 -preset ultrafast \
+    -i "$THIRD_CAMERA_DEVICE" -an -c:v libx264 -preset ultrafast \
     -pix_fmt yuv420p -avoid_negative_ts make_zero -movflags +faststart \
     -progress "$LOG_ROOT/third_camera.progress" \
     "$THIRD_CAMERA_FILE" \
