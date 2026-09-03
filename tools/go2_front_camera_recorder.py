@@ -40,14 +40,25 @@ class FrontCameraRecorder:
         print("first frame received; H264 recording started", flush=True)
 
     def record(self):
-        deadline = time.monotonic() + self.timeout
+        startup_deadline = time.monotonic() + self.timeout
+        recovery_deadline = None
         while True:
             code, data = self.client.GetImageSample()
             if code != 0:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(f"VideoClient.GetImageSample failed: code={code}")
+                now = time.monotonic()
+                if self.frames == 0:
+                    if now >= startup_deadline:
+                        raise RuntimeError(f"VideoClient.GetImageSample failed: code={code}")
+                else:
+                    if recovery_deadline is None:
+                        recovery_deadline = now + self.timeout
+                    if now >= recovery_deadline:
+                        raise RuntimeError(
+                            f"VideoClient.GetImageSample failed after recovery timeout: code={code}"
+                        )
                 time.sleep(0.05)
                 continue
+            recovery_deadline = None
             image = cv2.imdecode(
                 np.frombuffer(bytes(data), dtype=np.uint8), cv2.IMREAD_COLOR
             )

@@ -29,6 +29,7 @@ THIRD_CAMERA_INPUT_FORMAT="${SEA_NAV_THIRD_CAMERA_INPUT_FORMAT:-yuyv422}"
 THIRD_CAMERA_FILE=""
 ENABLE_THIRD_CAMERA=0
 CAMERA_STOP_TIMEOUT=20
+CAMERA_STARTUP_TIMEOUT="${SEA_NAV_CAMERA_STARTUP_TIMEOUT:-20}"
 FIRST_PERSON_VIDEO_STATUS=NOT_VALIDATED
 THIRD_PERSON_VIDEO_STATUS=NOT_ENABLED
 
@@ -104,7 +105,12 @@ source_ros() {
 }
 
 write_pid() { printf '%s\n' "$2" >"$PID_ROOT/$1.pid"; }
-pid_alive() { kill -0 "$1" 2>/dev/null; }
+pid_alive() {
+  local pid="$1" state
+  kill -0 "$pid" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  [[ -n "$state" && "$state" != Z* ]]
+}
 
 wait_dead() {
   local pid="$1" timeout="${2:-6}" deadline=$((SECONDS + timeout))
@@ -391,6 +397,7 @@ start_front_camera_recording() {
   "$PYTHON" "$ROOT/tools/go2_front_camera_recorder.py" \
     --net "$FRONT_CAMERA_NET" --output "$FRONT_CAMERA_FILE" \
     --fps "$FRONT_CAMERA_FPS" --size "$FRONT_CAMERA_SIZE" \
+    --startup-timeout "$CAMERA_STARTUP_TIMEOUT" \
     >"$LOG_ROOT/front_camera.log" 2>&1 &
   write_pid front_camera "$!"
 }
@@ -421,7 +428,13 @@ start_third_camera_recording() {
 }
 
 wait_for_camera_recordings() {
-  local deadline=$((SECONDS + 12))
+  wait_for_front_camera_recording
+  ((ENABLE_THIRD_CAMERA)) || return 0
+  wait_for_third_camera_recording
+}
+
+wait_for_front_camera_recording() {
+  local deadline=$((SECONDS + CAMERA_STARTUP_TIMEOUT))
   while ((SECONDS < deadline)); do
     grep -Fq 'first frame received; H264 recording started' "$LOG_ROOT/front_camera.log" && break
     pid_alive "$(<"$PID_ROOT/front_camera.pid")" || die "FRONT_CAMERA=FAIL: recorder exited; see $LOG_ROOT/front_camera.log"
@@ -430,8 +443,10 @@ wait_for_camera_recordings() {
   grep -Fq 'first frame received; H264 recording started' "$LOG_ROOT/front_camera.log" \
     || die "FRONT_CAMERA=FAIL: no head-camera frames received; see $LOG_ROOT/front_camera.log"
   pass "FRONT_CAMERA=RECORDING"
-  ((ENABLE_THIRD_CAMERA)) || return 0
-  deadline=$((SECONDS + 12))
+}
+
+wait_for_third_camera_recording() {
+  local deadline=$((SECONDS + CAMERA_STARTUP_TIMEOUT))
   while ((SECONDS < deadline)); do
     grep -Eq '^frame=[1-9][0-9]*$' "$LOG_ROOT/third_camera.progress" && break
     pid_alive "$(<"$PID_ROOT/third_camera.pid")" || die "THIRD_CAMERA=FAIL: recorder exited; see $LOG_ROOT/third_camera.log"
@@ -671,10 +686,11 @@ main() {
   start_sensor_bridge
   check_official_sensor_chain
   start_front_camera_recording
+  wait_for_front_camera_recording
   if ((ENABLE_THIRD_CAMERA)); then
     start_third_camera_recording
+    wait_for_third_camera_recording
   fi
-  wait_for_camera_recordings
   start_monitors
   start_navigation
   say_yellow "WAIT_FOR_POSE_ARM: manually Start, then A; press B for ESTOP"
