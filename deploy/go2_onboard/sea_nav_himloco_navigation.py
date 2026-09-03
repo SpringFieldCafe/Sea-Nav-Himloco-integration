@@ -438,6 +438,10 @@ class NavigationMailbox:
                 return FixedCommand(0.0, 0.0, 0.0), "navigation_command_stale", age
             return FixedCommand(*self.command.tolist()), "", age
 
+    def last_state(self):
+        with self.lock:
+            return self.last_result.get("runtime_state", "UNKNOWN")
+
     def wait_for_fresh_command(self, timeout: float, on_wait=None):
         """Return only a result sourced after this call and within max_age."""
         deadline = time.monotonic() + float(timeout)

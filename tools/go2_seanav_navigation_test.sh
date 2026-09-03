@@ -681,10 +681,16 @@ main() {
   say_red "READY: sensor chain and SEA-Nav navigation are running"
   say_red "[EXPERIMENT] motion validation active; B or Ctrl+C ends the run"
   while pid_alive "$(<"$PID_ROOT/navigation.pid")"; do
+    pid_alive "$(<"$PID_ROOT/front_camera.pid")" \
+      || die "FRONT_CAMERA=FAIL: recorder exited during navigation; see $LOG_ROOT/front_camera.log"
+    if ((ENABLE_THIRD_CAMERA)); then
+      pid_alive "$(<"$PID_ROOT/third_camera.pid")" \
+        || die "THIRD_CAMERA=FAIL: recorder exited during navigation; see $LOG_ROOT/third_camera.log"
+    fi
     printf '\n%s========== GO2 STATUS ==========%s\n' "$BOLD" "$RESET"
     printf 'CPU=%s MCF=%s RAW_SENSOR=%s TRANSFORM=%s DESKEW=%s POINT_LIO=%s NAVIGATION=%s\n' \
       "$CPU_STATUS" "$MCF_STATUS" "$RAW_SENSOR_STATUS" "$TRANSFORM_STATUS" "$DESKEW_STATUS" "$POINT_LIO_STATUS" "${RED}${NAVIGATION_STATUS}${RESET}"
-    sleep 5
+    sleep 0.2
   done
   NAVIGATION_STATUS=ENDED
   MOTION_STATUS=RECORDED

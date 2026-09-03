@@ -218,6 +218,9 @@ def main(argv=None):
                 "reason": reason, "age_s": age, "result": result,
                 "move_elapsed_ms": move_elapsed_ms,
             }, separators=(",", ":")))
+            if navigation is not None and mailbox.last_state() == "GOAL_REACHED":
+                print("[official] GOAL_REACHED; stopping navigation and ending recording session")
+                break
             time.sleep(period)
     except KeyboardInterrupt:
         print("[official] Ctrl+C")
