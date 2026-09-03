@@ -27,6 +27,9 @@ THIRD_CAMERA_FPS="${SEA_NAV_THIRD_CAMERA_FPS:-30}"
 THIRD_CAMERA_SIZE="${SEA_NAV_THIRD_CAMERA_SIZE:-1280x720}"
 THIRD_CAMERA_INPUT_FORMAT="${SEA_NAV_THIRD_CAMERA_INPUT_FORMAT:-yuyv422}"
 THIRD_CAMERA_FILE=""
+ENABLE_THIRD_CAMERA=0
+FIRST_PERSON_VIDEO_STATUS=NOT_VALIDATED
+THIRD_PERSON_VIDEO_STATUS=NOT_ENABLED
 
 POLICY="$ROOT/models/locomotion/himloco/himloco_himppo_continuous_turning_policy_1460.pt"
 NAV_POLICY="$ROOT/artifacts/go2_onboard/sea_nav_policy_peer_model_2000.pt"
@@ -424,6 +427,7 @@ wait_for_camera_recordings() {
   grep -Fq 'first frame received; H264 recording started' "$LOG_ROOT/front_camera.log" \
     || die "FRONT_CAMERA=FAIL: no head-camera frames received; see $LOG_ROOT/front_camera.log"
   pass "FRONT_CAMERA=RECORDING"
+  ((ENABLE_THIRD_CAMERA)) || return 0
   deadline=$((SECONDS + 12))
   while ((SECONDS < deadline)); do
     grep -Eq '^frame=[1-9][0-9]*$' "$LOG_ROOT/third_camera.progress" && break
@@ -433,6 +437,24 @@ wait_for_camera_recordings() {
   grep -Eq '^frame=[1-9][0-9]*$' "$LOG_ROOT/third_camera.progress" \
     || die "THIRD_CAMERA=FAIL: no RGB frames received; see $LOG_ROOT/third_camera.log"
   pass "THIRD_CAMERA=RECORDING"
+}
+
+validate_video_recording() {
+  local label="$1" file="$2" output duration
+  [[ -s "$file" ]] || { fail "$label=FAIL: missing or empty file: $file"; return 1; }
+  output="$(ffprobe -v error -select_streams v:0 \
+    -show_entries stream=codec_name,width,height,avg_frame_rate \
+    -show_entries format=duration -of default=noprint_wrappers=1 "$file" 2>&1)" || {
+      fail "$label=FAIL: ffprobe could not read $file"
+      return 1
+    }
+  duration="$(awk -F= '/^duration=/ {print $2}' <<<"$output")"
+  [[ "$output" == *"codec_name="* && "$output" == *"width="* && "$output" == *"height="* ]] \
+    || { fail "$label=FAIL: no video stream in $file"; return 1; }
+  awk -v duration="$duration" 'BEGIN {exit !(duration > 0)}' \
+    || { fail "$label=FAIL: zero duration in $file"; return 1; }
+  printf '[PASS] %s=PLAYABLE %s\n%s\n' "$label" "$file" "$output"
+  return 0
 }
 
 record_exit_reason() {
@@ -481,12 +503,17 @@ PY
 write_summary() {
   ((SUMMARY_WRITTEN)) && return 0
   SUMMARY_WRITTEN=1
-  local policy_sha nav_sha cloud_rate deskew_rate odom_rate
+  local policy_sha nav_sha cloud_rate deskew_rate odom_rate camera_validation
   policy_sha="$(sha256sum "$POLICY" 2>/dev/null | awk '{print $1}' || true)"
   nav_sha="$(sha256sum "$NAV_POLICY" 2>/dev/null | awk '{print $1}' || true)"
   cloud_rate="$(awk '/average rate:/ {v=$3} END {print v+0}' "$LOG_ROOT/cloud_hz.log" 2>/dev/null || printf '0')"
   deskew_rate="$(awk '/average rate:/ {v=$3} END {print v+0}' "$LOG_ROOT/deskew_hz.log" 2>/dev/null || printf '0')"
   odom_rate="$(awk '/average rate:/ {v=$3} END {print v+0}' "$LOG_ROOT/odom_hz.log" 2>/dev/null || printf '0')"
+  camera_validation=PASS
+  [[ "$FIRST_PERSON_VIDEO_STATUS" == PASS ]] || camera_validation=FAIL
+  if ((ENABLE_THIRD_CAMERA)) && [[ "$THIRD_PERSON_VIDEO_STATUS" != PASS ]]; then
+    camera_validation=FAIL
+  fi
   write_motion_metrics || true
   {
     printf 'CPU_STATUS=%s\nMCF_STATUS=%s\nRAW_SENSOR_STATUS=%s\n' "$CPU_STATUS" "$MCF_STATUS" "$RAW_SENSOR_STATUS"
@@ -504,10 +531,11 @@ write_summary() {
     printf 'STATE_DIAGNOSTICS=%s\n' "$RUN_ROOT/state_diagnostics.jsonl"
     printf 'FIRST_PERSON_VIDEO=%s\nFRONT_CAMERA_NET=%s\n' "$FRONT_CAMERA_FILE" "$FRONT_CAMERA_NET"
     printf 'THIRD_PERSON_VIDEO=%s\nTHIRD_CAMERA_DEVICE=%s\nTHIRD_CAMERA_INPUT_FORMAT=%s\n' "$THIRD_CAMERA_FILE" "$THIRD_CAMERA_DEVICE" "$THIRD_CAMERA_INPUT_FORMAT"
+    printf 'FIRST_PERSON_VIDEO_STATUS=%s\nTHIRD_PERSON_VIDEO_STATUS=%s\n' "$FIRST_PERSON_VIDEO_STATUS" "$THIRD_PERSON_VIDEO_STATUS"
     [[ -f "$LOG_ROOT/motion_metrics.log" ]] && cat "$LOG_ROOT/motion_metrics.log" || printf 'MOTION_ODOM=NOT_AVAILABLE\n'
     printf 'NAVIGATION_STATUS=%s\nMOTION_STATUS=%s\n' "$NAVIGATION_STATUS" "$MOTION_STATUS"
     printf 'EXIT_REASON=%s\n' "$EXIT_REASON"
-    if [[ "$CPU_STATUS" == PASS && "$MCF_STATUS" == PASS && "$RAW_SENSOR_STATUS" == PASS && "$TRANSFORM_STATUS" == OFFICIAL_NATIVE && "$DESKEW_STATUS" == OFFICIAL_NATIVE && "$POINT_LIO_STATUS" == NOT_USED_OFFICIAL && "$NAVIGATION_STATUS" != NOT_STARTED && "$NAVIGATION_STATUS" != FAIL ]]; then
+    if [[ "$CPU_STATUS" == PASS && "$MCF_STATUS" == PASS && "$RAW_SENSOR_STATUS" == PASS && "$TRANSFORM_STATUS" == OFFICIAL_NATIVE && "$DESKEW_STATUS" == OFFICIAL_NATIVE && "$POINT_LIO_STATUS" == NOT_USED_OFFICIAL && "$NAVIGATION_STATUS" != NOT_STARTED && "$NAVIGATION_STATUS" != FAIL && "$camera_validation" == PASS ]]; then
       printf 'RESULT=PASS\n'
     else
       printf 'RESULT=FAIL\n'
@@ -527,6 +555,12 @@ cleanup() {
   stop_pid NAVIGATION "$PID_ROOT/navigation.pid" INT || true
   stop_pid FRONT_CAMERA "$PID_ROOT/front_camera.pid" INT || true
   stop_pid THIRD_CAMERA "$PID_ROOT/third_camera.pid" INT || true
+  if [[ -n "$FRONT_CAMERA_FILE" ]]; then
+    validate_video_recording FIRST_PERSON_VIDEO "$FRONT_CAMERA_FILE" && FIRST_PERSON_VIDEO_STATUS=PASS || FIRST_PERSON_VIDEO_STATUS=FAIL
+  fi
+  if ((ENABLE_THIRD_CAMERA)) && [[ -n "$THIRD_CAMERA_FILE" ]]; then
+    validate_video_recording THIRD_PERSON_VIDEO "$THIRD_CAMERA_FILE" && THIRD_PERSON_VIDEO_STATUS=PASS || THIRD_PERSON_VIDEO_STATUS=FAIL
+  fi
   stop_pid ODOM_ADAPTER "$PID_ROOT/adapter.pid" INT || true
   stop_pid POINT_LIO "$PID_ROOT/pointlio.pid" INT || true
   stop_pid TRANSFORM "$PID_ROOT/transform.pid" INT || true
@@ -564,6 +598,7 @@ Usage: bash tools/go2_seanav_navigation_test.sh --goal-x X --goal-y Y [options]
   --third-camera-fps VALUE    third-person capture rate, default 30
   --third-camera-size VALUE   third-person video size, default 1280x720
   --third-camera-format NAME  third-person V4L2 input format, default yuyv422
+  --enable-third-camera       enable optional D435i third-person recording
   --fixed-sport-vx VALUE      diagnostic fixed SportClient command, no speed cap
   --goal-tolerance VALUE     goal stop radius, default 0.15m
   --goal-slowdown-distance M  start smooth forward braking, default 0.50m
@@ -598,6 +633,7 @@ main() {
       --third-camera-fps) (($# >= 2)) || die "--third-camera-fps requires a value"; THIRD_CAMERA_FPS="$2"; shift 2 ;;
       --third-camera-size) (($# >= 2)) || die "--third-camera-size requires a value"; THIRD_CAMERA_SIZE="$2"; shift 2 ;;
       --third-camera-format) (($# >= 2)) || die "--third-camera-format requires a value"; THIRD_CAMERA_INPUT_FORMAT="$2"; shift 2 ;;
+      --enable-third-camera) ENABLE_THIRD_CAMERA=1; shift ;;
       --fixed-sport-vx) (($# >= 2)) || die "--fixed-sport-vx requires a value"; FIXED_SPORT_VX="$2"; shift 2 ;;
       --goal-tolerance) (($# >= 2)) || die "--goal-tolerance requires a value"; GOAL_TOLERANCE="$2"; shift 2 ;;
       --goal-slowdown-distance) (($# >= 2)) || die "--goal-slowdown-distance requires a value"; GOAL_SLOWDOWN_DISTANCE="$2"; shift 2 ;;
@@ -627,7 +663,9 @@ main() {
   start_sensor_bridge
   check_official_sensor_chain
   start_front_camera_recording
-  start_third_camera_recording
+  if ((ENABLE_THIRD_CAMERA)); then
+    start_third_camera_recording
+  fi
   wait_for_camera_recordings
   start_monitors
   start_navigation
